@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.log
+
+# Reconstruction inputs/outputs live outside the repo; guard anyway.
+artifacts_*/
+ab_average/
+ab_latest/
+kf_*/
+*.npz
+*.mp4
+*.pt
+
+# Upstream bulk, fetched from the LingBot-Map release rather than vendored here:
+# 203 MB of sample clips, the paper, benchmark fixtures and demo renders.
+example/
+benchmark/
+assets/
+demo_render/
+lingbot-map_paper.pdf
