@@ -1,0 +1,272 @@
+{
+ "generated": "2026-09-19",
+ "metric": "median camera separation at GLOMAP-verified revisits, normalised by scene p90 radius; lower is better",
+ "revisit_gt_n": 42,
+ "runs": {
+  "ab_average": {
+   "meta": {
+    "num_frames": 2219,
+    "voxel_size": 0.005,
+    "conf_threshold": 1.5,
+    "conf_percentile": 0.0,
+    "source": "C:\\Users\\shaur\\Downloads\\VID_20260913_192111.mp4",
+    "fps": 30.0,
+    "crop": 1.0,
+    "clahe": true,
+    "num_scale_frames": 12,
+    "anchor_stride": 72,
+    "keyframe_interval": 30
+   },
+   "points": 1827137,
+   "revisit": {
+    "revisits": 2,
+    "median": 1.2813,
+    "p90": 1.4003,
+    "under_10pct": 0.0
+   }
+  },
+  "ab_latest": {
+   "meta": {
+    "num_frames": 2219,
+    "voxel_size": 0.005,
+    "conf_threshold": 1.5,
+    "conf_percentile": 0.0,
+    "source": "C:\\Users\\shaur\\Downloads\\VID_20260913_192111.mp4",
+    "fps": 30.0,
+    "crop": 1.0,
+    "clahe": true,
+    "num_scale_frames": 12,
+    "anchor_stride": 72,
+    "keyframe_interval": 30
+   },
+   "points": 1827137,
+   "revisit": {
+    "revisits": 2,
+    "median": 1.2813,
+    "p90": 1.4003,
+    "under_10pct": 0.0
+   }
+  },
+  "artifacts": {
+   "meta": {
+    "num_frames": 586,
+    "voxel_size": 0.0035,
+    "conf_threshold": 1.5,
+    "conf_percentile": 0.0,
+    "source": "C:\\Users\\shaur\\Downloads\\VID_20260822_183412.mp4",
+    "fps": 30.0,
+    "crop": 0.75,
+    "clahe": true,
+    "num_scale_frames": 32,
+    "anchor_stride": 10,
+    "keyframe_interval": 10
+   },
+   "points": 1049591,
+   "revisit": null
+  },
+  "artifacts_courthouse": {
+   "meta": {
+    "num_frames": 120,
+    "voxel_size": 0.0035089724062828988,
+    "conf_threshold": 1.5,
+    "conf_percentile": 0.0,
+    "source": "C:\\Users\\shaur\\OneDrive\\Desktop\\Test\\lingbot-map\\example\\courthouse",
+    "fps": 10.0,
+    "crop": 1.0,
+    "clahe": false,
+    "num_scale_frames": 16,
+    "anchor_stride": 1,
+    "keyframe_interval": 1
+   },
+   "points": 2383784,
+   "revisit": null
+  },
+  "artifacts_glomap": {
+   "meta": {
+    "num_frames": 8711,
+    "fps": 29.97,
+    "voxel_size": 0.02,
+    "conf_threshold": 0.0,
+    "source": "COLMAP/GLOMAP reconstruction"
+   },
+   "points": 266059,
+   "revisit": {
+    "revisits": 42,
+    "median": 0.0355,
+    "p90": 0.0897,
+    "under_10pct": 0.9286
+   }
+  },
+  "artifacts_yard": {
+   "meta": {
+    "num_frames": 447,
+    "voxel_size": 0.005,
+    "conf_threshold": 1.5,
+    "conf_percentile": 0.0,
+    "source": "C:\\Users\\shaur\\Downloads\\VID_20260913_192111.mp4",
+    "fps": 10.0,
+    "crop": 1.0,
+    "clahe": true,
+    "num_scale_frames": 24,
+    "anchor_stride": 12,
+    "keyframe_interval": 10
+   },
+   "points": 599393,
+   "revisit": null
+  },
+  "artifacts_yard_avg": {
+   "meta": {
+    "num_frames": 7564,
+    "voxel_size": 0.005,
+    "conf_threshold": 1.5,
+    "conf_percentile": 0.0,
+    "source": "C:\\Users\\shaur\\Downloads\\VID_20260913_192111.mp4",
+    "fps": 30.0,
+    "crop": 1.0,
+    "clahe": true,
+    "num_scale_frames": 12,
+    "anchor_stride": 72,
+    "keyframe_interval": 30
+   },
+   "points": 3853053,
+   "revisit": {
+    "revisits": 35,
+    "median": 0.6648,
+    "p90": 0.9947,
+    "under_10pct": 0.0
+   }
+  },
+  "artifacts_yard_final": {
+   "meta": {
+    "num_frames": 7564,
+    "voxel_size": 0.005,
+    "conf_threshold": 1.5,
+    "conf_percentile": 0.0,
+    "source": "C:\\Users\\shaur\\Downloads\\VID_20260913_192111.mp4",
+    "fps": 30.0,
+    "crop": 1.0,
+    "clahe": true,
+    "num_scale_frames": 12,
+    "anchor_stride": 72,
+    "keyframe_interval": 30
+   },
+   "points": 3733417,
+   "revisit": {
+    "revisits": 31,
+    "median": 0.6171,
+    "p90": 1.1659,
+    "under_10pct": 0.0
+   }
+  },
+  "artifacts_yard_full": {
+   "meta": {
+    "num_frames": 2525,
+    "voxel_size": 0.006,
+    "conf_threshold": 1.5,
+    "conf_percentile": 0.0,
+    "source": "C:\\Users\\shaur\\Downloads\\VID_20260913_192111.mp4",
+    "fps": 10.0,
+    "crop": 1.0,
+    "clahe": true,
+    "num_scale_frames": 12,
+    "anchor_stride": 24,
+    "keyframe_interval": 10
+   },
+   "points": 1723950,
+   "revisit": {
+    "revisits": 2,
+    "median": 0.3212,
+    "p90": 0.4235,
+    "under_10pct": 0.0
+   }
+  },
+  "inj30": {
+   "meta": {
+    "num_frames": 7564,
+    "voxel_size": 0.005,
+    "conf_threshold": 1.5,
+    "conf_percentile": 0.0,
+    "source": "C:\\Users\\shaur\\Downloads\\VID_20260913_192111.mp4",
+    "fps": 30.0,
+    "crop": 1.0,
+    "clahe": true,
+    "num_scale_frames": 12,
+    "anchor_stride": 72,
+    "keyframe_interval": 30
+   },
+   "points": 3990278,
+   "revisit": {
+    "revisits": 35,
+    "median": 0.7305,
+    "p90": 1.3868,
+    "under_10pct": 0.0
+   }
+  },
+  "inj30x4": {
+   "meta": {
+    "num_frames": 7564,
+    "voxel_size": 0.005,
+    "conf_threshold": 1.5,
+    "conf_percentile": 0.0,
+    "source": "C:\\Users\\shaur\\Downloads\\VID_20260913_192111.mp4",
+    "fps": 30.0,
+    "crop": 1.0,
+    "clahe": true,
+    "num_scale_frames": 12,
+    "anchor_stride": 72,
+    "keyframe_interval": 30
+   },
+   "points": 3951549,
+   "revisit": {
+    "revisits": 35,
+    "median": 0.6625,
+    "p90": 1.1646,
+    "under_10pct": 0.0286
+   }
+  },
+  "kf120": {
+   "meta": {
+    "num_frames": 7564,
+    "voxel_size": 0.005,
+    "conf_threshold": 1.5,
+    "conf_percentile": 0.0,
+    "source": "C:\\Users\\shaur\\Downloads\\VID_20260913_192111.mp4",
+    "fps": 30.0,
+    "crop": 1.0,
+    "clahe": true,
+    "num_scale_frames": 12,
+    "anchor_stride": 72,
+    "keyframe_interval": 120
+   },
+   "points": 2175923,
+   "revisit": {
+    "revisits": 35,
+    "median": 0.6411,
+    "p90": 1.3223,
+    "under_10pct": 0.0
+   }
+  },
+  "kf240": {
+   "meta": {
+    "num_frames": 7564,
+    "voxel_size": 0.005,
+    "conf_threshold": 1.5,
+    "conf_percentile": 0.0,
+    "source": "C:\\Users\\shaur\\Downloads\\VID_20260913_192111.mp4",
+    "fps": 30.0,
+    "crop": 1.0,
+    "clahe": true,
+    "num_scale_frames": 12,
+    "anchor_stride": 72,
+    "keyframe_interval": 240
+   },
+   "points": 1751074,
+   "revisit": {
+    "revisits": 35,
+    "median": 0.5037,
+    "p90": 0.848,
+    "under_10pct": 0.0286
+   }
+  }
+ }
+}
