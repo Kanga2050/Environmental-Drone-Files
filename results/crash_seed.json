@@ -1,0 +1,10 @@
+{
+ "note": "crashes observed before run.out switched from truncate to append; map counts from live logs at the time",
+ "source": "observed",
+ "records": {
+  "11": {"exit_code": 3221225477, "geometric_maps": 139, "expected_maps": 250},
+  "15": {"exit_code": 3221225477, "geometric_maps": 148, "expected_maps": 250},
+  "16": {"exit_code": 3221225477, "geometric_maps": 241, "expected_maps": 250},
+  "17": {"exit_code": 3221226505, "geometric_maps": 249, "expected_maps": 250}
+ }
+}
