@@ -1,0 +1,117 @@
+{
+ "note": "blocks where patch_match_stereo crashed partway; fusion used only the geometric maps written before the fault. Rerun these to recover the remainder.",
+ "rerun_hint": "delete the listed block_XXXX.ply and relaunch; the script recomputes only missing blocks",
+ "partial_blocks": 5,
+ "est_total_points_lost": 757808,
+ "blocks": [
+  {
+   "block": 11,
+   "frames": [
+    "002442.jpg",
+    "002698.jpg"
+   ],
+   "frame_index_range": [
+    2310,
+    2559
+   ],
+   "points_recovered": 500628,
+   "points_per_map": 3602,
+   "uncovered_frames": 111,
+   "est_points_if_complete": 900410,
+   "est_points_lost": 399782,
+   "exit_code": 3221225477,
+   "fault": "0xC0000005 ACCESS_VIOLATION",
+   "geometric_maps": 139,
+   "expected_maps": 250,
+   "map_coverage": 0.556,
+   "source": "observed"
+  },
+  {
+   "block": 15,
+   "frames": [
+    "003289.jpg",
+    "003541.jpg"
+   ],
+   "frame_index_range": [
+    3150,
+    3399
+   ],
+   "points_recovered": 511752,
+   "points_per_map": 3458,
+   "uncovered_frames": 102,
+   "est_points_if_complete": 864446,
+   "est_points_lost": 352694,
+   "exit_code": 3221225477,
+   "fault": "0xC0000005 ACCESS_VIOLATION",
+   "geometric_maps": 148,
+   "expected_maps": 250,
+   "map_coverage": 0.592,
+   "source": "observed"
+  },
+  {
+   "block": 16,
+   "frames": [
+    "003502.jpg",
+    "003771.jpg"
+   ],
+   "frame_index_range": [
+    3360,
+    3609
+   ],
+   "points_recovered": 79595,
+   "points_per_map": 330,
+   "uncovered_frames": 9,
+   "est_points_if_complete": 82567,
+   "est_points_lost": 2972,
+   "exit_code": 3221225477,
+   "fault": "0xC0000005 ACCESS_VIOLATION",
+   "geometric_maps": 241,
+   "expected_maps": 250,
+   "map_coverage": 0.964,
+   "source": "observed"
+  },
+  {
+   "block": 17,
+   "frames": [
+    "003732.jpg",
+    "003982.jpg"
+   ],
+   "frame_index_range": [
+    3570,
+    3819
+   ],
+   "points_recovered": 182138,
+   "points_per_map": 731,
+   "uncovered_frames": 1,
+   "est_points_if_complete": 182869,
+   "est_points_lost": 731,
+   "exit_code": 3221226505,
+   "fault": "0xC0000409 STACK_BUFFER_OVERRUN",
+   "geometric_maps": 249,
+   "expected_maps": 250,
+   "map_coverage": 0.996,
+   "source": "observed"
+  },
+  {
+   "block": 37,
+   "frames": [
+    "008173.jpg",
+    "008428.jpg"
+   ],
+   "frame_index_range": [
+    7770,
+    8019
+   ],
+   "points_recovered": 405514,
+   "points_per_map": 1629,
+   "uncovered_frames": 1,
+   "est_points_if_complete": 407143,
+   "est_points_lost": 1629,
+   "exit_code": 3221226505,
+   "fault": "0xC0000409 STACK_BUFFER_OVERRUN",
+   "geometric_maps": 249,
+   "expected_maps": 250,
+   "map_coverage": 0.996
+  }
+ ]
+}
