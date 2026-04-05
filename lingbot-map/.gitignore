@@ -1,19 +1,21 @@
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 *.egg-info/
-dist/
-build/
-*.so
-.eggs/
-demo_render/
-CLAUDE.md
-.claude/
-.agents/
-skyseg.onnx
-.claude-remote
-weights/
-.DS_Store
-**/.DS_Store
-docs/
+*.log
 
+# Reconstruction inputs/outputs live outside the repo; guard anyway.
+artifacts_*/
+ab_average/
+ab_latest/
+kf_*/
+*.npz
+*.mp4
+*.pt
+
+# Upstream bulk, fetched from the LingBot-Map release rather than vendored here:
+# 203 MB of sample clips, the paper, benchmark fixtures and demo renders.
+example/
+benchmark/
+assets/
+demo_render/
+lingbot-map_paper.pdf
