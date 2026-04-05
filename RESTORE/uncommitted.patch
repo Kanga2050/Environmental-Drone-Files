@@ -1,0 +1,749 @@
+diff --git a/README.md b/README.md
+index 0009682..a3c8781 100644
+--- a/README.md
++++ b/README.md
+@@ -45,6 +45,8 @@ LingBot-Map has focused on:
+ - [🎬 Interactive Demo (`demo.py`)](#-interactive-demo-demopy)
+   - [Try the Example Scenes](#try-the-example-scenes)
+   - [Streaming with Keyframe Interval](#streaming-with-keyframe-interval)
++  - [Bounded Context / Indefinite Streaming (`--max_context_frames`)](#bounded-context--indefinite-streaming---max_context_frames)
++  - [Open-Ended Runs with a Live Viewer (`stream_video.py`)](#open-ended-runs-with-a-live-viewer-stream_videopy)
+   - [Windowed Inference (for long sequences, >3000 frames)](#windowed-inference-for-long-sequences-3000-frames)
+   - [Sky Masking](#sky-masking)
+   - [Visualization Options](#visualization-options)
+@@ -241,6 +243,75 @@ Use `--keyframe_interval` to reduce KV cache memory by only keeping every N-th f
+ > **Note on inference range.** Our method does not perform state resetting by default, so the maximum inference range is bounded by the longest distance seen during training on the dataset. Beyond that distance, state resetting becomes necessary. If you observe pose collapse, switch to windowed mode (`--mode windowed`) — in most cases tuning `--keyframe_interval` alone is enough and the rest of the windowed parameters can stay at their defaults.
+ 
+ 
++### Bounded Context / Indefinite Streaming (`--max_context_frames`)
++
++Streaming state has three parts, and by default only two of them are bounded:
++
++| Part | Holds | Bounded by | Cost at 518x294 |
++|:--|:--|:--|:--|
++| Anchor context | first `--num_scale_frames` frames, full detail | never evicted | ~0.6 GB |
++| Local pose-reference window | last N keyframes, full detail | `--kv_cache_sliding_window` | ~77 MB per frame |
++| Trajectory memory | 6 special tokens per past keyframe | **nothing, by default** | ~0.3 MB per frame |
++
++The trajectory memory is append-only, so KV memory grows for the entire
++sequence and an open-ended run eventually OOMs no matter how small the window
++is. `--max_context_frames N` caps it: each frame then sees at most the anchor,
++the local window, and the newest `N` frames of trajectory memory, and total KV
++memory becomes **constant**.
++
++```bash
++python demo.py --model_path /path/to/lingbot-map.pt \
++    --video_path video.mp4 --fps 10 \
++    --max_context_frames 256 --kv_cache_sliding_window 64
++```
++
++Unlike `--mode windowed`, nothing is reset: the cache is a rolling working set,
++so there are no window seams to stitch or align. The trade is that geometry
++older than `N` keyframes stops contributing to drift correction.
++
++- Default is `-1` (unbounded, original behavior).
++- On the SDPA backend the cap is exact. On FlashInfer, eviction is page-granular
++  (`floor(page_size / 6)` frames), so the live memory oscillates between `N` and
++  `N + frames_per_special_page`; the first special page is pinned as an
++  attention sink so the anchor's special tokens survive.
++- `--kv_cache_sliding_window` dominates VRAM (~77 MB/frame at 518x294 vs
++  ~0.3 MB/frame for trajectory memory) — reach for it first when tuning.
++- Sizing guide (518x294, SDPA, bf16): window 32 ~= 4 GB, 64 ~= 7 GB, 96 ~= 10 GB,
++  plus ~4.6 GB of model weights.
++
++3D-RoPE positions still advance once per **keyframe**, so `--max_frame_num`
++bounds total keyframes (~512 B per slot). Raise it, or raise
++`--keyframe_interval` so each slot covers more frames.
++
++### Open-Ended Runs with a Live Viewer (`stream_video.py`)
++
++`demo.py` decodes the whole video up front and accumulates every frame's dense
++prediction before opening the viewer, so RAM grows with length even when the KV
++cache does not. `stream_video.py` keeps ingest, inference, and output all flat:
++frames are decoded one at a time, predictions are consumed immediately into a
++voxel-hashed global map with a hard point budget, and the viser viewer comes up
++*before* inference and refreshes as the map grows.
++
++```bash
++python stream_video.py \
++    --video_path video.mp4 --fps 10 \
++    --model_path /path/to/lingbot-map.pt \
++    --max_context_frames 256 --kv_cache_sliding_window 64 \
++    --max_points 3000000 --port 8080
++```
++
++| Flag | Purpose |
++|:--|:--|
++| `--max_context_frames` | Trajectory-memory cap (above) |
++| `--max_points` | Hard ceiling on map points; oldest voxels age out |
++| `--voxel_size` | Map dedup resolution (0 = auto from the initial scene extent) |
++| `--loop` | Replay the source forever — the memory-stability soak test |
++| `--save_ply` | Write the final map on exit |
++| `--no_viewer` | Headless (benchmarking) |
++
++Per-frame stats report VRAM, map size, and live trajectory-memory depth, so you
++can watch the footprint flatten instead of trusting that it does.
++
+ ### Windowed Inference (for long sequences, >3000 frames)
+ 
+ ```bash
+diff --git a/demo.py b/demo.py
+index 3299fba..ad56de8 100644
+--- a/demo.py
++++ b/demo.py
+@@ -145,6 +145,7 @@ def load_model(args, device):
+         kv_cache_scale_frames=args.num_scale_frames,
+         kv_cache_cross_frame_special=True,
+         kv_cache_include_scale_frames=True,
++        kv_cache_max_context_frames=getattr(args, "max_context_frames", -1),
+         use_sdpa=args.use_sdpa,
+         camera_num_iterations=args.camera_num_iterations,
+     )
+@@ -376,6 +377,16 @@ def main():
+             "scale_frames + (window_size - scale_frames) * keyframe_interval.",
+     )
+     parser.add_argument("--kv_cache_sliding_window", type=int, default=64)
++    parser.add_argument(
++        "--max_context_frames",
++        type=int,
++        default=-1,
++        help="Cap how many past frames each frame may attend to in the trajectory-memory "
++            "(special token) stream. -1 = unbounded (original behavior), which grows KV "
++            "memory linearly with sequence length. Any positive value makes streaming "
++            "memory CONSTANT, so a run can continue indefinitely. Independent of "
++            "--kv_cache_sliding_window, which bounds the full-detail local window.",
++    )
+     parser.add_argument("--camera_num_iterations", type=int, default=4,
+                         help="Camera head iterative-refinement steps. Default 4; set 1 for faster inference "
+                             "(skips 3 refinement passes at a small accuracy cost).")
+diff --git a/lingbot_map/aggregator/stream.py b/lingbot_map/aggregator/stream.py
+index 4074c3f..450bdc4 100644
+--- a/lingbot_map/aggregator/stream.py
++++ b/lingbot_map/aggregator/stream.py
+@@ -47,6 +47,7 @@ class AggregatorStream(AggregatorBase):
+         kv_cache_cross_frame_special: bool = True,
+         kv_cache_include_scale_frames: bool = True,
+         kv_cache_camera_only: bool = False,
++        kv_cache_max_context_frames: int = -1,
+         # Base class parameters via **kwargs
+         **kwargs
+     ):
+@@ -66,6 +67,10 @@ class AggregatorStream(AggregatorBase):
+             kv_cache_cross_frame_special: Keep special tokens from evicted frames
+             kv_cache_include_scale_frames: Include scale frames in KV cache
+             kv_cache_camera_only: Only keep camera tokens from evicted frames
++            kv_cache_max_context_frames: Cap on how many past frames stay in the
++                trajectory-memory (special token) stream. -1 = unbounded (original
++                behavior); > 0 keeps streaming memory constant so a run can go on
++                indefinitely.
+             **kwargs: Base class parameters
+         """
+         self.sliding_window_size = sliding_window_size
+@@ -81,6 +86,7 @@ class AggregatorStream(AggregatorBase):
+         self.kv_cache_cross_frame_special = kv_cache_cross_frame_special
+         self.kv_cache_include_scale_frames = kv_cache_include_scale_frames
+         self.kv_cache_camera_only = kv_cache_camera_only
++        self.kv_cache_max_context_frames = kv_cache_max_context_frames
+ 
+         # Pop kwargs that are passed but not needed by base class
+         kwargs.pop('enable_stream_inference', None)
+@@ -144,6 +150,7 @@ class AggregatorStream(AggregatorBase):
+                 kv_cache_cross_frame_special=self.kv_cache_cross_frame_special,
+                 kv_cache_include_scale_frames=self.kv_cache_include_scale_frames,
+                 kv_cache_camera_only=self.kv_cache_camera_only,
++            kv_cache_max_context_frames=self.kv_cache_max_context_frames,
+             )
+             for _ in range(depth)
+         ])
+@@ -210,8 +217,15 @@ class AggregatorStream(AggregatorBase):
+             head_dim = 64
+             if tokens_per_frame is None:
+                 tokens_per_frame = (self.img_size // self.patch_size) ** 2 + self.num_special_tokens
++            bounded = self.kv_cache_max_context_frames > 0
++            # Spare patch pages. Only 2 are structurally needed (append-then-evict,
++            # plus the deferred-eviction non-keyframe path); the historical 16 costs
++            # a full page of VRAM each, which is worth reclaiming in bounded mode.
++            patch_page_headroom = 4 if bounded else 16
+             # max_num_frames: scale + window + headroom
+-            max_num_frames = self.kv_cache_scale_frames + self.kv_cache_sliding_window + 16
++            max_num_frames = (
++                self.kv_cache_scale_frames + self.kv_cache_sliding_window + patch_page_headroom
++            )
+             self.kv_cache_manager = FlashInferKVCacheManager(
+                 num_blocks=self.depth,
+                 max_num_frames=max_num_frames,
+@@ -223,13 +237,21 @@ class AggregatorStream(AggregatorBase):
+                 num_special_tokens=self.num_special_tokens,
+                 scale_frames=self.kv_cache_scale_frames,
+                 sliding_window=self.kv_cache_sliding_window,
++                # Only consulted in unbounded mode; with a context cap the special
++                # pool is sized from the cap instead, so it no longer scales with
++                # max_frame_num (which we want free to grow for RoPE headroom).
+                 max_total_frames=self.max_frame_num + 100,
+                 force_fp32=getattr(self, 'kv_cache_force_fp32', False),
+                 fa3=getattr(self, 'kv_cache_fa3', False),
++                max_context_frames=self.kv_cache_max_context_frames,
++                patch_page_headroom=patch_page_headroom,
+             )
+             logger.info(
+                 f"FlashInfer KV cache manager initialized: {self.depth} blocks, "
+-                f"max_frames={max_num_frames}, tokens_per_frame={tokens_per_frame}"
++                f"max_frames={max_num_frames}, tokens_per_frame={tokens_per_frame}, "
++                f"trajectory_memory="
++                + (f"{self.kv_cache_max_context_frames} frames (bounded)" if bounded
++                   else "unbounded")
+             )
+         return self.kv_cache_manager
+ 
+diff --git a/lingbot_map/heads/camera_head.py b/lingbot_map/heads/camera_head.py
+index 70ebe9a..8b3246b 100644
+--- a/lingbot_map/heads/camera_head.py
++++ b/lingbot_map/heads/camera_head.py
+@@ -184,6 +184,7 @@ class CameraCausalHead(nn.Module):
+         kv_cache_cross_frame_special: bool = True,
+         kv_cache_include_scale_frames: bool = True,
+         kv_cache_camera_only: bool = False,
++        kv_cache_max_context_frames: int = -1,
+         # 3D RoPE parameters
+         enable_3d_rope: bool = False,
+         max_frame_num: int = 1024,
+@@ -222,7 +223,7 @@ class CameraCausalHead(nn.Module):
+         # Build the trunk using a sequence of transformer blocks.
+         self.trunk = nn.Sequential(
+             *[
+-                CameraBlock(dim=dim_in, num_heads=num_heads, mlp_ratio=mlp_ratio, init_values=init_values, elementwise_attn_output_gate=elementwise_attn_output_gate, sliding_window_size=sliding_window_size, attend_to_scale_frames=attend_to_scale_frames, num_random_frames=num_random_frames, kv_cache_sliding_window=kv_cache_sliding_window, kv_cache_scale_frames=kv_cache_scale_frames, kv_cache_cross_frame_special=kv_cache_cross_frame_special, kv_cache_include_scale_frames=kv_cache_include_scale_frames, kv_cache_camera_only=kv_cache_camera_only)
++                CameraBlock(dim=dim_in, num_heads=num_heads, mlp_ratio=mlp_ratio, init_values=init_values, elementwise_attn_output_gate=elementwise_attn_output_gate, sliding_window_size=sliding_window_size, attend_to_scale_frames=attend_to_scale_frames, num_random_frames=num_random_frames, kv_cache_sliding_window=kv_cache_sliding_window, kv_cache_scale_frames=kv_cache_scale_frames, kv_cache_cross_frame_special=kv_cache_cross_frame_special, kv_cache_include_scale_frames=kv_cache_include_scale_frames, kv_cache_camera_only=kv_cache_camera_only, kv_cache_max_context_frames=kv_cache_max_context_frames)
+                 for _ in range(trunk_depth)
+             ]
+         )
+diff --git a/lingbot_map/layers/attention.py b/lingbot_map/layers/attention.py
+index fee688b..7d2a2c5 100644
+--- a/lingbot_map/layers/attention.py
++++ b/lingbot_map/layers/attention.py
+@@ -87,6 +87,35 @@ class Attention(nn.Module):
+         return x
+ 
+ 
++def trim_trajectory_memory(kv_cache, global_idx: int, max_context_frames: int) -> None:
++    """Bound the dict-cache trajectory memory to the most recent N frames.
++
++    ``k_{i}_special`` / ``v_{i}_special`` hold the special tokens (camera +
++    registers + scale) of every frame that has already fallen out of the local
++    sliding window.  Left alone they grow for the whole sequence, which is the
++    one part of the streaming state that is *not* O(1) — it is what makes
++    open-ended runs die on VRAM.
++
++    Keeping only the newest ``max_context_frames`` entries turns the whole cache
++    into a fixed-size working set: anchor frames (kept in full in ``k_{i}``)
++    + this bounded memory + the local window.  The anchor is stored separately,
++    so a plain FIFO trim here does not disturb it.
++
++    ``max_context_frames <= 0`` disables the trim (original behavior).
++    """
++    if max_context_frames <= 0:
++        return
++    key_k = f"k_{global_idx}_special"
++    if kv_cache.get(key_k) is None:
++        return
++    if kv_cache[key_k].shape[2] <= max_context_frames:
++        return
++    key_v = f"v_{global_idx}_special"
++    # dim 2 is the frame axis: [B, H, frames, num_special, D]
++    kv_cache[key_k] = kv_cache[key_k][:, :, -max_context_frames:, :, :].contiguous()
++    kv_cache[key_v] = kv_cache[key_v][:, :, -max_context_frames:, :, :].contiguous()
++
++
+ class CausalAttention(nn.Module):
+     """
+     Causal self-attention module with KV cache support for streaming inference.
+@@ -111,6 +140,7 @@ class CausalAttention(nn.Module):
+         kv_cache_cross_frame_special: bool = True,
+         kv_cache_include_scale_frames: bool = True,
+         kv_cache_camera_only: bool = False,  # If True, only cache camera token (no scale token)
++        kv_cache_max_context_frames: int = -1,
+     ) -> None:
+         super().__init__()
+         assert dim % num_heads == 0, "dim should be divisible by num_heads"
+@@ -135,6 +165,7 @@ class CausalAttention(nn.Module):
+         self.kv_cache_cross_frame_special = kv_cache_cross_frame_special
+         self.kv_cache_include_scale_frames = kv_cache_include_scale_frames
+         self.kv_cache_camera_only = kv_cache_camera_only
++        self.kv_cache_max_context_frames = kv_cache_max_context_frames
+ 
+     def forward(self, x: Tensor, block_mask=None, pos=None, pos_kv=None, frame_seqlen=None, video_mask=None, kv_cache=None, current_start=0, current_end=0, global_idx=0, num_frame_per_block=1, num_frame_for_scale=-1, enable_3d_rope=False, sliding_window_size=-1, attend_to_scale_frames=False, num_random_frames=0, attend_to_special_tokens=False, num_register_tokens=4, is_scale_frames=False) -> Tensor:
+         B, N, C = x.shape
+@@ -243,9 +274,11 @@ class CausalAttention(nn.Module):
+                 # This ensures current frame only attends to frames within the sliding window
+                 self._apply_kv_cache_eviction_causal(kv_cache, global_idx, camera_token_idx, scale_token_idx)
+ 
+-                # Retrieve full k, v from cache (already RoPE-applied, already evicted)
+-                k = kv_cache[f"k_{global_idx}"].clone()
+-                v = kv_cache[f"v_{global_idx}"].clone()
++                # Retrieve full k, v from cache (already RoPE-applied, already evicted).
++                # Read-only from here on, and the cache is rebound rather than
++                # mutated, so no clone is needed — see SDPAAttention.forward.
++                k = kv_cache[f"k_{global_idx}"]
++                v = kv_cache[f"v_{global_idx}"]
+             else:
+                 # NON-KEYFRAME: attend to [cached + current] without storing in cache
+                 if kv_cache[f"k_{global_idx}"] is not None:
+@@ -335,6 +368,10 @@ class CausalAttention(nn.Module):
+                             kv_cache[f"v_{global_idx}_special"] = torch.cat(
+                                 [kv_cache[f"v_{global_idx}_special"], new_special_v], dim=2)
+ 
++                        trim_trajectory_memory(
++                            kv_cache, global_idx, self.kv_cache_max_context_frames
++                        )
++
+                     if self.kv_cache_include_scale_frames:
+                         kv_cache[f"k_{global_idx}"] = torch.cat([
+                             kv_cache[f"k_{global_idx}"][:, :, :scale_frames, :, :],
+@@ -375,6 +412,7 @@ class FlashInferAttention(Attention):
+         kv_cache_cross_frame_special: bool = True,
+         kv_cache_include_scale_frames: bool = True,
+         kv_cache_camera_only: bool = False,
++        kv_cache_max_context_frames: int = -1,
+     ) -> None:
+         if not FLASHINFER_AVAILABLE:
+             raise RuntimeError("FlashInfer is not available. Please install flashinfer.")
+@@ -398,6 +436,7 @@ class FlashInferAttention(Attention):
+         self.kv_cache_cross_frame_special = kv_cache_cross_frame_special
+         self.kv_cache_include_scale_frames = kv_cache_include_scale_frames
+         self.kv_cache_camera_only = kv_cache_camera_only
++        self.kv_cache_max_context_frames = kv_cache_max_context_frames
+ 
+     def prepare_qkv(self, x: Tensor, pos=None, enable_3d_rope: bool = False) -> tuple:
+         """Fused pre-attention ops for single-frame streaming (Phase 2).
+@@ -580,6 +619,7 @@ class SDPAAttention(Attention):
+         kv_cache_cross_frame_special: bool = True,
+         kv_cache_include_scale_frames: bool = True,
+         kv_cache_camera_only: bool = False,
++        kv_cache_max_context_frames: int = -1,
+     ) -> None:
+         super().__init__(
+             dim=dim, num_heads=num_heads, qkv_bias=qkv_bias, proj_bias=proj_bias,
+@@ -591,6 +631,7 @@ class SDPAAttention(Attention):
+         self.kv_cache_cross_frame_special = kv_cache_cross_frame_special
+         self.kv_cache_include_scale_frames = kv_cache_include_scale_frames
+         self.kv_cache_camera_only = kv_cache_camera_only
++        self.kv_cache_max_context_frames = kv_cache_max_context_frames
+ 
+     def forward(self, x: Tensor, pos=None,
+                 num_patches=None, num_special=None, num_frames=None, enable_3d_rope=False,
+@@ -652,8 +693,15 @@ class SDPAAttention(Attention):
+                     kv_cache, global_idx, camera_token_idx, scale_token_idx, num_register_tokens
+                 )
+ 
+-                k_cached = kv_cache[f"k_{global_idx}"].clone()
+-                v_cached = kv_cache[f"v_{global_idx}"].clone()
++                # No clone: the cache is only ever *rebound* (torch.cat returns a
++                # fresh tensor), never mutated in place, and everything
++                # downstream — reshape, cat with specials, SDPA — is read-only.
++                # Cloning here allocated a second full-cache copy per block per
++                # frame, which at a 96-frame window is ~330 MB of pure churn and
++                # the main source of allocator fragmentation on Windows, where
++                # expandable_segments is unavailable.
++                k_cached = kv_cache[f"k_{global_idx}"]
++                v_cached = kv_cache[f"v_{global_idx}"]
+             else:
+                 # NON-KEYFRAME: attend to [cached + current] without storing in cache
+                 if kv_cache[f"k_{global_idx}"] is not None:
+@@ -715,6 +763,10 @@ class SDPAAttention(Attention):
+                             kv_cache[f"v_{global_idx}_special"] = torch.cat(
+                                 [kv_cache[f"v_{global_idx}_special"], new_special_v], dim=2)
+ 
++                        trim_trajectory_memory(
++                            kv_cache, global_idx, self.kv_cache_max_context_frames
++                        )
++
+                     if self.kv_cache_include_scale_frames:
+                         kv_cache[f"k_{global_idx}"] = torch.cat([
+                             kv_cache[f"k_{global_idx}"][:, :, :scale_frames, :, :],
+diff --git a/lingbot_map/layers/block.py b/lingbot_map/layers/block.py
+index ff40a69..42fbbd2 100644
+--- a/lingbot_map/layers/block.py
++++ b/lingbot_map/layers/block.py
+@@ -177,6 +177,7 @@ class FlashInferBlock(nn.Module):
+         kv_cache_cross_frame_special: bool = True,
+         kv_cache_include_scale_frames: bool = True,
+         kv_cache_camera_only: bool = False,
++        kv_cache_max_context_frames: int = -1,
+     ) -> None:
+         super().__init__()
+ 
+@@ -195,6 +196,7 @@ class FlashInferBlock(nn.Module):
+             kv_cache_cross_frame_special=kv_cache_cross_frame_special,
+             kv_cache_include_scale_frames=kv_cache_include_scale_frames,
+             kv_cache_camera_only=kv_cache_camera_only,
++            kv_cache_max_context_frames=kv_cache_max_context_frames,
+         )
+ 
+         self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
+@@ -340,6 +342,7 @@ class CameraBlock(nn.Module):
+         kv_cache_cross_frame_special: bool = True,
+         kv_cache_include_scale_frames: bool = True,
+         kv_cache_camera_only: bool = False,
++        kv_cache_max_context_frames: int = -1,
+     ) -> None:
+         super().__init__()
+ 
+@@ -351,7 +354,8 @@ class CameraBlock(nn.Module):
+                                     kv_cache_scale_frames=kv_cache_scale_frames,
+                                     kv_cache_cross_frame_special=kv_cache_cross_frame_special,
+                                     kv_cache_include_scale_frames=kv_cache_include_scale_frames,
+-                                    kv_cache_camera_only=kv_cache_camera_only)
++                                    kv_cache_camera_only=kv_cache_camera_only,
++                                    kv_cache_max_context_frames=kv_cache_max_context_frames)
+ 
+         self.sliding_window_size = sliding_window_size
+         self.attend_to_scale_frames = attend_to_scale_frames
+@@ -486,6 +490,7 @@ class SDPABlock(nn.Module):
+         kv_cache_cross_frame_special: bool = True,
+         kv_cache_include_scale_frames: bool = True,
+         kv_cache_camera_only: bool = False,
++        kv_cache_max_context_frames: int = -1,
+     ) -> None:
+         super().__init__()
+         self.norm1 = norm_layer(dim)
+@@ -497,6 +502,7 @@ class SDPABlock(nn.Module):
+             kv_cache_cross_frame_special=kv_cache_cross_frame_special,
+             kv_cache_include_scale_frames=kv_cache_include_scale_frames,
+             kv_cache_camera_only=kv_cache_camera_only,
++            kv_cache_max_context_frames=kv_cache_max_context_frames,
+         )
+         self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
+         self.drop_path1 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+diff --git a/lingbot_map/layers/flashinfer_cache.py b/lingbot_map/layers/flashinfer_cache.py
+index f4c6a48..d31fd81 100644
+--- a/lingbot_map/layers/flashinfer_cache.py
++++ b/lingbot_map/layers/flashinfer_cache.py
+@@ -9,11 +9,23 @@ Two logical streams sharing one physical page pool per layer:
+     - Scale frames  → scale_patch_pages  (never evicted, maxlen=scale_frames)
+     - Recent frames → live_window_patch_pages (evicted when > sliding_window)
+ 
+-  Special stream (append-only, never recycled):
++  Special stream (trajectory memory):
+     - num_special_tokens (6) special tokens per frame
+     - Packed continuously: one special page holds floor(page_size/6) frames
+       e.g. page_size=256 → 42 frames per special page, 4 slots wasted
+     - Specials written for EVERY frame (including scale + window), not just evicted ones.
++    - max_context_frames < 0 (default): append-only, never recycled.  Memory
++      grows linearly with sequence length — fine for bounded runs, fatal for
++      open-ended ones.
++    - max_context_frames > 0: bounded.  The first `special_sink_pages` pages are
++      pinned (they hold the anchor/scale frames' specials, which act as an
++      attention sink); older pages beyond that are recycled FIFO so the live
++      set never exceeds `special_sink_pages + ceil(max_context_frames /
++      frames_per_special_page) + 1` pages.  Total KV memory is then CONSTANT and
++      the model can stream indefinitely.
++      Eviction granularity is one page (floor(page_size/6) frames), so the
++      effective look-back oscillates between max_context_frames and
++      max_context_frames + frames_per_special_page.
+ 
+ Physical layout per block:
+     kv_caches[block_idx]: [max_num_pages, 2, page_size, H, D]
+@@ -70,6 +82,18 @@ class FlashInferKVCacheManager:
+         sliding_window:      Sliding window size (64).
+         max_total_frames:    Upper bound on total frames ever processed; used to
+                              pre-allocate the special page pool (default 2048).
++                             Ignored when max_context_frames > 0.
++        max_context_frames:  Cap on how many past frames stay visible in the
++                             trajectory-memory (special) stream.  -1 = unbounded
++                             (original behavior).  > 0 makes total KV memory
++                             constant, so streaming can run indefinitely.
++        special_sink_pages:  Special pages pinned at the head and never evicted.
++                             Page 0 holds the scale/anchor frames' special tokens,
++                             so keeping >= 1 preserves the anchor context.
++        patch_page_headroom: Spare patch pages beyond scale + sliding_window.
++                             Only 2 are structurally needed (append-then-evict and
++                             the deferred-eviction non-keyframe path); the default
++                             of 16 is historical and costs ~1 page of VRAM each.
+     """
+ 
+     def __init__(
+@@ -87,6 +111,9 @@ class FlashInferKVCacheManager:
+         max_total_frames: int = 2048,
+         force_fp32: bool = False,
+         fa3: bool = False,
++        max_context_frames: int = -1,
++        special_sink_pages: int = 1,
++        patch_page_headroom: int = 16,
+     ):
+         if not FLASHINFER_AVAILABLE:
+             raise RuntimeError("FlashInfer is not available. Please install flashinfer.")
+@@ -128,12 +155,31 @@ class FlashInferKVCacheManager:
+         self.device = device
+ 
+         # ── Page pool sizing ─────────────────────────────────────────────────
+-        # Patch: scale + window + 16 headroom  (pages recycled → fixed count)
+-        max_patch_pages = scale_frames + sliding_window + 16   # e.g. 88
+-        # Special: enough for max_total_frames × 6 tokens, plus 16 headroom
+-        max_special_pages = (
+-            math.ceil(max_total_frames * num_special_tokens / self.page_size) + 16
+-        )
++        # Patch: scale + window + headroom  (pages recycled → fixed count)
++        max_patch_pages = scale_frames + sliding_window + patch_page_headroom
++        # Frames whose specials fit in one page (6 tokens each).
++        self.frames_per_special_page = max(1, self.page_size // num_special_tokens)
++        self.max_context_frames = int(max_context_frames)
++        self.special_sink_pages = max(0, int(special_sink_pages))
++
++        if self.max_context_frames > 0:
++            # Bounded trajectory memory → constant-size special pool.
++            # +1 rolling page so the page currently being filled is never the one
++            # we are forced to evict.
++            rolling_pages = (
++                math.ceil(self.max_context_frames / self.frames_per_special_page) + 1
++            )
++            self.max_live_special_pages = self.special_sink_pages + rolling_pages
++            # +2 spare covers the allocate-then-evict ordering inside
++            # _write_special_tokens and the deferred-eviction rollback path.
++            max_special_pages = self.max_live_special_pages + 2
++        else:
++            # Unbounded (original behavior): size for max_total_frames up front.
++            self.max_live_special_pages = None
++            max_special_pages = (
++                math.ceil(max_total_frames * num_special_tokens / self.page_size) + 16
++            )
++
+         self.max_patch_pages = max_patch_pages
+         self.max_num_pages = max_patch_pages + max_special_pages
+ 
+@@ -165,6 +211,11 @@ class FlashInferKVCacheManager:
+             list(range(max_patch_pages, self.max_num_pages)) for _ in range(num_blocks)
+         ]
+         self.special_token_count: List[int] = [0] * num_blocks
++        # Pages ever allocated to the special stream (including ones since
++        # evicted).  Needed because len(all_special_pages) no longer equals the
++        # virtual page count once FIFO eviction kicks in.
++        self.special_pages_allocated: List[int] = [0] * num_blocks
++        self.special_frames_evicted: List[int] = [0] * num_blocks
+ 
+         # Frame counter per block (determines scale vs window routing)
+         self.frame_count: List[int] = [0] * num_blocks
+@@ -292,9 +343,16 @@ class FlashInferKVCacheManager:
+             f"({self.special_token_count[block_idx]} - {n})"
+         )
+         new_num_pages = math.ceil(new_count / self.page_size) if new_count > 0 else 0
+-        while len(self.all_special_pages[block_idx]) > new_num_pages:
++        # Compare against the *virtual* allocation count, not len(all_special_pages):
++        # under bounded mode the latter is capped by FIFO eviction, so it would
++        # under-report and skip freeing the page this frame just allocated.
++        while (
++            self.special_pages_allocated[block_idx] > new_num_pages
++            and self.all_special_pages[block_idx]
++        ):
+             freed = self.all_special_pages[block_idx].pop()
+             self.free_special_pages[block_idx].append(freed)
++            self.special_pages_allocated[block_idx] -= 1
+         self.special_token_count[block_idx] = new_count
+ 
+         # 3) Decrement frame count
+@@ -319,6 +377,11 @@ class FlashInferKVCacheManager:
+             "live_pages":     len(self.live_window_patch_pages[block_idx]),
+             "free_pages":     len(self.free_patch_pages[block_idx]),
+             "special_tokens": int(self.special_token_count[block_idx]),
++            "special_pages":  len(self.all_special_pages[block_idx]),
++            "memory_frames":  int(
++                self.special_token_count[block_idx] // self.num_special_tokens
++                - self.special_frames_evicted[block_idx]
++            ),
+         }
+ 
+     def _gather_kv(self, block_idx: int):
+@@ -429,6 +492,8 @@ class FlashInferKVCacheManager:
+             self.free_patch_pages[i]   = list(range(self.max_patch_pages))
+             self.free_special_pages[i] = list(range(self.max_patch_pages, self.max_num_pages))
+             self.special_token_count[i] = 0
++            self.special_pages_allocated[i] = 0
++            self.special_frames_evicted[i] = 0
+             self.frame_count[i] = 0
+ 
+     # =========================================================================
+@@ -471,6 +536,31 @@ class FlashInferKVCacheManager:
+ 
+     # ── Internal write helpers ────────────────────────────────────────────────
+ 
++    def _evict_special_pages(self, block_idx: int) -> None:
++        """Recycle the oldest rolling special pages once the live set is over cap.
++
++        The first ``special_sink_pages`` entries are pinned — page 0 carries the
++        scale/anchor frames' special tokens and serves as the attention sink, so
++        dropping it would cut the model loose from its coordinate anchor.
++        Everything after the sink is a FIFO ring: the oldest page is recycled,
++        which is what bounds trajectory-memory growth.
++
++        No-op when ``max_context_frames <= 0`` (unbounded mode) or while
++        ``_defer_eviction`` is set (the non-keyframe attend-then-rollback path,
++        where the frame must stay reversible).
++
++        Page-granular eviction keeps the visible-page list contiguous, which is
++        what lets ``compute_last_page_len`` stay a single scalar: every page but
++        the tail is full.
++        """
++        if self.max_live_special_pages is None or self._defer_eviction:
++            return
++        pages = self.all_special_pages[block_idx]
++        while len(pages) > self.max_live_special_pages:
++            old_page = pages.pop(self.special_sink_pages)
++            self.free_special_pages[block_idx].append(old_page)
++            self.special_frames_evicted[block_idx] += self.frames_per_special_page
++
+     def _write_patch_page(self, block_idx: int, patch_k: Tensor, patch_v: Tensor) -> int:
+         """
+         Allocate one free patch page and write patches_per_frame patch tokens.
+@@ -533,10 +623,12 @@ class FlashInferKVCacheManager:
+                 assert self.free_special_pages[block_idx], (
+                     f"block {block_idx}: special page pool exhausted at "
+                     f"special_token_count={self.special_token_count[block_idx]}. "
+-                    f"Increase max_total_frames."
++                    f"Increase max_total_frames (or set max_context_frames)."
+                 )
+                 new_page = self.free_special_pages[block_idx].pop()
+                 self.all_special_pages[block_idx].append(new_page)
++                self.special_pages_allocated[block_idx] += 1
++                self._evict_special_pages(block_idx)
+ 
+             tail_page = self.all_special_pages[block_idx][-1]
+             space     = self.page_size - tail_offset   # free slots in tail page
+diff --git a/lingbot_map/models/gct_stream.py b/lingbot_map/models/gct_stream.py
+index bfca2cf..3b19832 100644
+--- a/lingbot_map/models/gct_stream.py
++++ b/lingbot_map/models/gct_stream.py
+@@ -143,6 +143,7 @@ class GCTStream(GCTBase):
+         kv_cache_cross_frame_special: bool = True,
+         kv_cache_include_scale_frames: bool = True,
+         kv_cache_camera_only: bool = False,
++        kv_cache_max_context_frames: int = -1,
+         # Backend selection
+         use_sdpa: bool = False,  # If True, use SDPA (no flashinfer needed); default: FlashInfer
+         # Gradient checkpointing
+@@ -176,6 +177,10 @@ class GCTStream(GCTBase):
+             kv_cache_cross_frame_special: Keep special tokens from evicted frames
+             kv_cache_include_scale_frames: Include scale frames in KV cache
+             kv_cache_camera_only: Only keep camera tokens from evicted frames
++            kv_cache_max_context_frames: Cap on how many past frames stay in the
++                trajectory-memory (special token) stream. -1 = unbounded (original
++                behavior); > 0 keeps streaming memory constant so a run can go on
++                indefinitely.
+         """
+         # Store stream-specific parameters before calling super().__init__()
+         self.pretrained_path = pretrained_path
+@@ -196,6 +201,7 @@ class GCTStream(GCTBase):
+         self.kv_cache_cross_frame_special = kv_cache_cross_frame_special
+         self.kv_cache_include_scale_frames = kv_cache_include_scale_frames
+         self.kv_cache_camera_only = kv_cache_camera_only
++        self.kv_cache_max_context_frames = kv_cache_max_context_frames
+         self.use_sdpa = use_sdpa
+         self.camera_num_iterations = camera_num_iterations
+ 
+@@ -247,6 +253,7 @@ class GCTStream(GCTBase):
+             kv_cache_cross_frame_special=self.kv_cache_cross_frame_special,
+             kv_cache_include_scale_frames=self.kv_cache_include_scale_frames,
+             kv_cache_camera_only=self.kv_cache_camera_only,
++            kv_cache_max_context_frames=self.kv_cache_max_context_frames,
+             use_gradient_checkpoint=self.use_gradient_checkpoint,
+         )
+ 
+@@ -268,6 +275,7 @@ class GCTStream(GCTBase):
+             kv_cache_cross_frame_special=self.kv_cache_cross_frame_special,
+             kv_cache_include_scale_frames=self.kv_cache_include_scale_frames,
+             kv_cache_camera_only=self.kv_cache_camera_only,
++            kv_cache_max_context_frames=self.kv_cache_max_context_frames,
+             # Camera head 3D RoPE parameters
+             enable_3d_rope=self.enable_camera_3d_rope,
+             max_frame_num=self.max_frame_num,
+diff --git a/lingbot_map/models/gct_stream_window.py b/lingbot_map/models/gct_stream_window.py
+index 0edd971..848d539 100644
+--- a/lingbot_map/models/gct_stream_window.py
++++ b/lingbot_map/models/gct_stream_window.py
+@@ -162,6 +162,7 @@ class GCTStream(GCTBase):
+         kv_cache_cross_frame_special: bool = True,
+         kv_cache_include_scale_frames: bool = True,
+         kv_cache_camera_only: bool = False,
++        kv_cache_max_context_frames: int = -1,
+         # Backend selection
+         use_sdpa: bool = False,  # If True, use SDPA (no flashinfer needed); default: FlashInfer
+         # Gradient checkpointing
+@@ -195,6 +196,10 @@ class GCTStream(GCTBase):
+             kv_cache_cross_frame_special: Keep special tokens from evicted frames
+             kv_cache_include_scale_frames: Include scale frames in KV cache
+             kv_cache_camera_only: Only keep camera tokens from evicted frames
++            kv_cache_max_context_frames: Cap on how many past frames stay in the
++                trajectory-memory (special token) stream. -1 = unbounded (original
++                behavior); > 0 keeps streaming memory constant so a run can go on
++                indefinitely.
+         """
+         # Store stream-specific parameters before calling super().__init__()
+         self.pretrained_path = pretrained_path
+@@ -215,6 +220,7 @@ class GCTStream(GCTBase):
+         self.kv_cache_cross_frame_special = kv_cache_cross_frame_special
+         self.kv_cache_include_scale_frames = kv_cache_include_scale_frames
+         self.kv_cache_camera_only = kv_cache_camera_only
++        self.kv_cache_max_context_frames = kv_cache_max_context_frames
+         self.use_sdpa = use_sdpa
+         self.camera_num_iterations = camera_num_iterations
+ 
+@@ -266,6 +272,7 @@ class GCTStream(GCTBase):
+             kv_cache_cross_frame_special=self.kv_cache_cross_frame_special,
+             kv_cache_include_scale_frames=self.kv_cache_include_scale_frames,
+             kv_cache_camera_only=self.kv_cache_camera_only,
++            kv_cache_max_context_frames=self.kv_cache_max_context_frames,
+             use_gradient_checkpoint=self.use_gradient_checkpoint,
+         )
+ 
+@@ -287,6 +294,7 @@ class GCTStream(GCTBase):
+             kv_cache_cross_frame_special=self.kv_cache_cross_frame_special,
+             kv_cache_include_scale_frames=self.kv_cache_include_scale_frames,
+             kv_cache_camera_only=self.kv_cache_camera_only,
++            kv_cache_max_context_frames=self.kv_cache_max_context_frames,
+             # Camera head 3D RoPE parameters
+             enable_3d_rope=self.enable_camera_3d_rope,
+             max_frame_num=self.max_frame_num,
+diff --git a/lingbot_map/models/gct_stream_window_v2.py b/lingbot_map/models/gct_stream_window_v2.py
+index f89e903..8c85c02 100644
+--- a/lingbot_map/models/gct_stream_window_v2.py
++++ b/lingbot_map/models/gct_stream_window_v2.py
+@@ -225,6 +225,7 @@ class GCTStream(GCTBase):
+         kv_cache_cross_frame_special: bool = True,
+         kv_cache_include_scale_frames: bool = True,
+         kv_cache_camera_only: bool = False,
++        kv_cache_max_context_frames: int = -1,
+         # Backend selection
+         use_sdpa: bool = False,  # If True, use SDPA (no flashinfer needed); default: FlashInfer
+         # Gradient checkpointing
+@@ -258,6 +259,10 @@ class GCTStream(GCTBase):
+             kv_cache_cross_frame_special: Keep special tokens from evicted frames
+             kv_cache_include_scale_frames: Include scale frames in KV cache
+             kv_cache_camera_only: Only keep camera tokens from evicted frames
++            kv_cache_max_context_frames: Cap on how many past frames stay in the
++                trajectory-memory (special token) stream. -1 = unbounded (original
++                behavior); > 0 keeps streaming memory constant so a run can go on
++                indefinitely.
+         """
+         # Store stream-specific parameters before calling super().__init__()
+         self.pretrained_path = pretrained_path
+@@ -278,6 +283,7 @@ class GCTStream(GCTBase):
+         self.kv_cache_cross_frame_special = kv_cache_cross_frame_special
+         self.kv_cache_include_scale_frames = kv_cache_include_scale_frames
+         self.kv_cache_camera_only = kv_cache_camera_only
++        self.kv_cache_max_context_frames = kv_cache_max_context_frames
+         self.use_sdpa = use_sdpa
+         self.camera_num_iterations = camera_num_iterations
+ 
+@@ -329,6 +335,7 @@ class GCTStream(GCTBase):
+             kv_cache_cross_frame_special=self.kv_cache_cross_frame_special,
+             kv_cache_include_scale_frames=self.kv_cache_include_scale_frames,
+             kv_cache_camera_only=self.kv_cache_camera_only,
++            kv_cache_max_context_frames=self.kv_cache_max_context_frames,
+             use_gradient_checkpoint=self.use_gradient_checkpoint,
+         )
+ 
+@@ -350,6 +357,7 @@ class GCTStream(GCTBase):
+             kv_cache_cross_frame_special=self.kv_cache_cross_frame_special,
+             kv_cache_include_scale_frames=self.kv_cache_include_scale_frames,
+             kv_cache_camera_only=self.kv_cache_camera_only,
++            kv_cache_max_context_frames=self.kv_cache_max_context_frames,
+             # Camera head 3D RoPE parameters
+             enable_3d_rope=self.enable_camera_3d_rope,
+             max_frame_num=self.max_frame_num,
