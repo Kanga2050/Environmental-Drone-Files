@@ -1,36 +1,4 @@
-"""Open-ended streaming reconstruction from a video, with a live web viewer.
 
-demo.py is a batch script wearing a streaming coat: it decodes the whole video
-into RAM, runs inference while appending every frame's dense prediction to a
-list, concatenates the lot, and only then opens the viewer.  Three separate
-things therefore grow without bound with sequence length -- the decoded frames,
-the accumulated predictions, and (until --max_context_frames) the KV cache.
-Any one of them ends the run on a fixed-memory machine.
-
-This script keeps all three flat, so the reconstruction can run for as long as
-frames keep arriving:
-
-  1. Frames are decoded and preprocessed one at a time, never held as a batch.
-  2. Attention context is capped by --max_context_frames (trajectory memory)
-     and --kv_cache_sliding_window (full-detail local window), so KV memory is
-     constant -- see lingbot_map/layers/flashinfer_cache.py and
-     trim_trajectory_memory in lingbot_map/layers/attention.py.
-  3. Per-frame predictions are consumed immediately into a voxel-hashed global
-     point map with a hard point budget (--max_points), then dropped.  Nothing
-     accumulates at full resolution.
-
-The viser viewer comes up before inference starts and refreshes as the map
-grows, so you watch the reconstruction build instead of waiting for it.
-
-Typical run:
-
-    python stream_video.py \
-        --video_path /path/to/video.mp4 --fps 10 \
-        --model_path /path/to/lingbot-map.pt \
-        --max_context_frames 512 --use_sdpa
-
-Then open http://localhost:8080.
-"""
 
 import argparse
 import os
@@ -38,11 +6,6 @@ import signal
 import sys
 import time
 
-# Must precede `import torch`. The KV cache is rebound (not mutated) on every
-# append, so the allocator sees a steady churn of large same-ish-sized blocks;
-# without help it fragments and OOMs well below the real ceiling.
-# expandable_segments is the good answer but is a silent no-op on Windows, so
-# fall back to bounding split size there.
 if sys.platform == "win32":
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:512")
 else:
@@ -61,36 +24,9 @@ from lingbot_map.utils.geometry import (
 )
 from lingbot_map.utils.pose_enc import pose_encoding_to_extri_intri
 
-# =============================================================================
-# Frame source -- decode + preprocess one frame at a time
-# =============================================================================
-
 def make_frame_prep(crop=1.0, undistort_k1=0.0, undistort_fov=120.0, clahe=False,
                     margins=(0.0, 0.0, 0.0, 0.0)):
-    """Build the source-frame conditioning step applied before model preprocessing.
 
-    All the knobs exist for footage the model was never meant to see -- action
-    cams and FPV feeds -- and all are identity by default:
-
-      margins       Trim (top, bottom, left, right) as fractions, independently.
-                    An OSD is not centred: this footage puts a small tag across
-                    the top 4.7% and a banner at 86.3-91.3% of height, with real
-                    scene below it. A symmetric crop wide enough to clear the
-                    banner also throws away the entire left and right thirds,
-                    which is where most of the parallax lives. Trimming each edge
-                    by what it actually needs keeps 81% of the height at full
-                    width instead of 56% of the frame.
-      crop          Center-crop a fraction of the frame, applied after margins.
-                    Blunter, but it also drops the most distorted part of a
-                    wide-angle lens, which margins alone do not.
-      undistort_k1  Rough Brown-Conrady radial correction. LingBot-Map predicts a
-                    pinhole intrinsic, so a fisheye frame is geometrically
-                    inconsistent with anything it can express; straightening it
-                    even approximately puts the points somewhere more sensible.
-      clahe         Local contrast equalization on luma. Analog video arrives
-                    washed out (pixel std ~0.14 vs ~0.31 for the repo examples),
-                    which starves a model that keys on texture.
-    """
     def prep(rgb: np.ndarray) -> np.ndarray:
         if undistort_k1:
             h, w = rgb.shape[:2]
@@ -117,14 +53,7 @@ def make_frame_prep(crop=1.0, undistort_k1=0.0, undistort_fov=120.0, clahe=False
     return prep
 
 def preprocess_frame(rgb: np.ndarray, image_size: int, patch_size: int) -> torch.Tensor:
-    """Apply the canonical "crop" preprocessing to a single in-memory RGB frame.
 
-    Mirrors ``load_and_preprocess_images(mode="crop")`` exactly -- width is fixed
-    to ``image_size``, height follows the aspect ratio rounded to a multiple of
-    ``patch_size``, and anything taller than ``image_size`` is center-cropped.
-    Kept in lockstep with that function so a video run and a folder run of the
-    same footage produce identical tensors.
-    """
     img = Image.fromarray(rgb)
     width, height = img.size
     new_width = image_size
@@ -137,32 +66,13 @@ def preprocess_frame(rgb: np.ndarray, image_size: int, patch_size: int) -> torch
     return tensor
 
 def frame_is_usable(rgb, min_luma, min_std):
-    """Reject analog dropouts before they reach the model.
 
-    An FPV video link does not degrade gracefully: it cuts to black or to rolling
-    interference for a second at a time. On this footage that is 4.1% black
-    frames and 3.3% washed-out ones, scattered right through the clip.
-
-    They have to be dropped rather than merely tolerated. The model is causal and
-    keeps a trajectory memory, so a garbage frame does not just produce a garbage
-    depth map -- it enters the pose chain, and every later frame is registered
-    against it. Skipping is free by comparison: the stream simply advances.
-    """
     g = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     return float(g.mean()) >= min_luma and float(g.std()) >= min_std
 
 def iter_video_frames(video_path, fps, stride, max_frames, loop, image_size, patch_size,
                       prep=None, min_luma=0.0, min_std=0.0, on_skip=None):
-    """Yield preprocessed frames from a video without ever holding the whole clip.
 
-    ``fps`` subsamples relative to the source frame rate; ``stride`` subsamples
-    again on top of that.  ``loop`` replays the file indefinitely, which is how
-    you exercise open-ended behavior (and verify memory really is flat) without
-    needing an hours-long recording.
-
-    The quality gate runs on the *conditioned* frame, after cropping, so a black
-    OSD bar cannot drag an otherwise good frame below threshold.
-    """
     emitted = 0
     pass_idx = 0
     while True:
@@ -205,7 +115,7 @@ def iter_video_frames(video_path, fps, stride, max_frames, loop, image_size, pat
 
 def iter_image_folder(image_folder, stride, max_frames, loop, image_size, patch_size,
                       prep=None):
-    """Same contract as ``iter_video_frames``, for a directory of stills."""
+
     import glob
     paths = []
     for ext in (".jpg", ".jpeg", ".png", ".JPG", ".PNG"):
@@ -227,25 +137,8 @@ def iter_image_folder(image_folder, stride, max_frames, loop, image_size, patch_
         if not loop:
             return
 
-# =============================================================================
-# Bounded global point map
-# =============================================================================
-
 class BoundedPointMap:
-    """A global point cloud with a hard memory ceiling.
 
-    Points are quantized to a voxel grid and deduplicated, so revisiting a
-    corridor refines it instead of piling up duplicate surface samples -- which
-    is what makes a fixed budget usable rather than merely survivable.  Once the
-    budget is reached the oldest voxels are dropped, so the map degrades into a
-    trailing window of the scene rather than failing.
-
-    Compaction is amortized: incoming frames land in a small pending list and
-    the vectorized dedup runs every ``compact_every`` frames.
-    """
-
-    # 21 bits per axis: +-1M voxels from the origin, which at a voxel size of
-    # extent/512 covers ~2000x the initial scene extent before wrapping.
     _BITS = 21
     _MASK = (1 << _BITS) - 1
     _HALF = 1 << (_BITS - 1)
@@ -295,7 +188,7 @@ class BoundedPointMap:
             self.compact()
 
     def compact(self) -> None:
-        """Merge pending points in: dedup by voxel, then enforce the budget."""
+
         if not self._pending_pos:
             return
         if self.average:
@@ -307,13 +200,12 @@ class BoundedPointMap:
         self._since_compact = 0
 
         keys = self._keys(pos)
-        # np.unique keeps the FIRST index of each key; reversing makes that the
-        # newest observation, so a revisited voxel takes its latest color.
+
         _, rev_idx = np.unique(keys[::-1], return_index=True)
         keep = len(keys) - 1 - rev_idx
 
         if len(keep) > self.max_points:
-            # Over budget: keep the most recently touched voxels.
+
             newest = np.argpartition(age[keep], -self.max_points)[-self.max_points:]
             self.dropped += len(keep) - self.max_points
             keep = keep[newest]
@@ -323,19 +215,7 @@ class BoundedPointMap:
         self._age = np.ascontiguousarray(age[keep])
 
     def _compact_average(self) -> None:
-        """Merge pending points by accumulating them, not by replacing.
 
-        Keeping the newest observation of a voxel throws away every earlier look
-        at the same surface. On analog video that is the expensive choice: the
-        chroma noise is close to independent between frames, so the mean over k
-        observations of one voxel carries roughly sqrt(k) less of it, and a
-        surface revisited thirty times comes back with a colour that is actually
-        its colour. Position averages too, which puts the point in the middle of
-        the voxel rather than wherever the last depth sample happened to land.
-
-        Confidence weights the mean, so a frame that was unsure about a pixel
-        moves it less than a frame that was not.
-        """
         new_pos = np.concatenate(self._pending_pos, axis=0)
         new_col = np.concatenate(self._pending_col, axis=0).astype(np.float32)
         new_age = np.concatenate(self._pending_age, axis=0)
@@ -371,7 +251,7 @@ class BoundedPointMap:
         first[inv_new[::-1]] = age32[::-1]
         if n_old:
             inv_old = inv[:n_old]
-            first[inv_old] = self._first          # an existing voxel is older
+            first[inv_old] = self._first
             older = np.zeros(m, np.int32)
             older[inv_old] = self._age.astype(np.int32)
             last = np.maximum(last, older)
@@ -395,7 +275,7 @@ class BoundedPointMap:
         self._col = np.ascontiguousarray(np.clip(cs / safe, 0, 255).astype(np.uint8))
 
     def observations(self):
-        """Per-point (first frame, last frame, summed weight, pixel count)."""
+
         if not self.average:
             return None
         return (self._first, self._age.astype(np.int32), self._w, self._n)
@@ -412,17 +292,7 @@ class BoundedPointMap:
                 + self._key.nbytes + self._psum.nbytes + self._csum.nbytes
                 + self._w.nbytes + self._n.nbytes + self._first.nbytes)
 
-# =============================================================================
-# Live viser viewer
-# =============================================================================
-
 class LiveViewer:
-    """A viser scene that is rewritten in place as the map grows.
-
-    Every update overwrites the same scene nodes, so the browser holds one point
-    cloud rather than one node per frame -- the per-frame-node approach in
-    PointCloudViewer is what makes long sequences unviewable.
-    """
 
     def __init__(self, port: int, point_size: float, max_traj: int = 4000):
         import viser
@@ -472,7 +342,7 @@ class LiveViewer:
                 color=(255, 90, 60),
             )
             self.traj.append(np.asarray(cam_t, dtype=np.float32))
-            # Thin the trajectory rather than letting it grow with the run.
+
             if len(self.traj) > self.max_traj * 2:
                 self.traj = self.traj[::2]
 
@@ -483,10 +353,6 @@ class LiveViewer:
                 color=(255, 200, 60),
                 line_width=2.0,
             )
-
-# =============================================================================
-# Model
-# =============================================================================
 
 def build_model(args, device):
     from lingbot_map.models.gct_stream import GCTStream
@@ -505,16 +371,7 @@ def build_model(args, device):
         use_sdpa=args.use_sdpa,
         camera_num_iterations=args.camera_num_iterations,
     )
-    # The model is ~1.16 B parameters, so the fp32 weights and the 4.3 GB state
-    # dict are each about 4.6 GB.  Holding both in host RAM at once is what kills
-    # this on a machine with other things running, so move the (still random)
-    # model to the GPU first and only then read the checkpoint: host memory peaks
-    # at one copy, not two.
-    #
-    # Do NOT use torch.load(mmap=True) here.  It reads without materializing the
-    # dict, which looks like exactly the right trick, but faulting those
-    # file-backed pages during load_state_dict access-violates on Windows
-    # (0xC0000005).  A plain read is slower and needs the RAM, but it works.
+
     model = model.to(device)
 
     print(f"Loading checkpoint: {args.model_path}")
@@ -527,8 +384,6 @@ def build_model(args, device):
         print(f"  Unexpected keys: {len(unexpected)}")
     del ckpt, state_dict
 
-    # Halve the aggregator's VRAM. The heads stay fp32 — they run under
-    # autocast(enabled=False) and upcast their inputs anyway.
     if device.type == "cuda":
         dt = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
         model.aggregator = model.aggregator.to(dtype=dt)
@@ -536,18 +391,6 @@ def build_model(args, device):
     return model.eval()
 
 class SkyMasker:
-    """ONNX sky segmentation, applied to the conditioned frame.
-
-    Sky is the one thing in this footage the reconstructor cannot win against.
-    A depth model asked for the distance to a cloud produces a confident-looking
-    surface at some arbitrary range, and once that lands in the map it is a wall
-    that plant growth can spread across and that later frames register against.
-    On this video roughly a quarter of saved frames were sky-dominated.
-
-    The mask is computed on the conditioned RGB (post-crop) so it lines up with
-    the depth map the model returns, and cached per call rather than per file --
-    the stream sees each frame exactly once.
-    """
 
     def __init__(self, model_path, enabled=True, threshold=0.5):
         self.session = None
@@ -569,7 +412,7 @@ class SkyMasker:
               f"on {self.session.get_providers()[0]}")
 
     def __call__(self, rgb, out_hw):
-        """Return a bool mask at ``out_hw``, True where the pixel is sky."""
+
         if self.session is None:
             return None
         img = cv2.resize(rgb, (self.w, self.h)).astype(np.float32) / 255.0
@@ -587,12 +430,7 @@ class SkyMasker:
 
 def frames_to_world(out, images_bchw, conf_threshold, downsample, conf_percentile=0.0,
                     sky_mask=None, pin_k=None):
-    """Turn one forward pass into world points, colors, and camera poses.
 
-    Deliberately reuses the same call chain as demo.py + PointCloudViewer
-    (pose_enc -> extri/intri -> se3 inverse -> unproject) so geometry matches the
-    shipped demo exactly rather than depending on a re-derived pose convention.
-    """
     hw = images_bchw.shape[-2:]
     extrinsic, intrinsic = pose_encoding_to_extri_intri(out["pose_enc"].float(), hw)
 
@@ -602,21 +440,19 @@ def frames_to_world(out, images_bchw, conf_threshold, downsample, conf_percentil
     extrinsic_4x4[..., 3, 3] = 1.0
     extrinsic = closed_form_inverse_se3_general(extrinsic_4x4)[..., :3, :4]
 
-    extrinsic = extrinsic[0].detach().cpu().numpy()             # [S, 3, 4]
-    intrinsic = intrinsic[0].detach().cpu().numpy()             # [S, 3, 3]
+    extrinsic = extrinsic[0].detach().cpu().numpy()
+    intrinsic = intrinsic[0].detach().cpu().numpy()
     if pin_k is not None:
         intrinsic[:, 0, 0] = pin_k[0]
         intrinsic[:, 1, 1] = pin_k[1]
-    depth = out["depth"][0].detach().float().cpu().numpy()      # [S, H, W, 1]
-    conf = out["depth_conf"][0].detach().float().cpu().numpy()  # [S, H, W]
+    depth = out["depth"][0].detach().float().cpu().numpy()
+    conf = out["depth_conf"][0].detach().float().cpu().numpy()
 
-    world = unproject_depth_map_to_point_map(depth, extrinsic, intrinsic)  # [S,H,W,3]
-    images = images_bchw[0].detach().float().cpu().numpy()      # [S, 3, H, W]
-    colors = np.transpose(images, (0, 2, 3, 1))                 # [S, H, W, 3]
+    world = unproject_depth_map_to_point_map(depth, extrinsic, intrinsic)
+    images = images_bchw[0].detach().float().cpu().numpy()
+    colors = np.transpose(images, (0, 2, 3, 1))
     conf_full = conf
 
-    # Subsample on the pixel grid before flattening: keeps a spatially uniform
-    # sample, and shrinks the arrays before any per-point work happens.
     world = world[:, ::downsample, ::downsample, :]
     colors = colors[:, ::downsample, ::downsample, :]
     conf = conf[:, ::downsample, ::downsample]
@@ -625,45 +461,27 @@ def frames_to_world(out, images_bchw, conf_threshold, downsample, conf_percentil
     cols = (np.clip(colors.reshape(-1, 3), 0.0, 1.0) * 255).astype(np.uint8)
 
     if sky_mask is not None:
-        # Zero the confidence of sky pixels so every downstream gate drops them.
+
         sub = sky_mask[::downsample, ::downsample]
         conf = np.where(sub[None, :, :], 0.0, conf)
 
-    conf_flat = conf.reshape(conf.shape[0], -1)          # [S, N]
+    conf_flat = conf.reshape(conf.shape[0], -1)
     if conf_percentile > 0:
-        # Relative gate: keep the top (100 - P)% of each frame's own confidence.
-        # The absolute threshold assumes the model's confidence is calibrated the
-        # way it is on clean footage; on input it finds hard (fisheye, analog
-        # noise) every value collapses toward 1.0 and a fixed cutoff silently
-        # discards the entire frame. Ranking within the frame still carries the
-        # signal even when the magnitudes do not.
+
         thr = np.percentile(conf_flat, conf_percentile, axis=1, keepdims=True)
         keep = conf_flat > thr
     else:
         keep = conf_flat > conf_threshold
 
     mask = np.isfinite(pts).all(axis=1) & keep.reshape(-1)
-    # `raw` carries the un-subsampled per-frame arrays. Detection needs them at
-    # full resolution to back-project a box's own pixels, and it needs the exact
-    # extrinsic/intrinsic used here so its 3D boxes land in the same frame as
-    # the point cloud rather than a re-derived one.
+
     raw = {"depth": depth, "conf": conf_full, "extrinsic": extrinsic,
            "intrinsic": intrinsic, "images": images}
     raw["kept_conf"] = conf.reshape(-1)[mask]
     return pts[mask], cols[mask], extrinsic, intrinsic, raw
 
 def save_frame_artifacts(frames_dir, frame_ids, raw, rgb_list):
-    """Persist one forward pass's per-frame data for later, repeatable analysis.
 
-    Depth and confidence go out as float16 -- depth spans roughly 0.03-2.5 here
-    and confidence is only ever compared against a threshold, so halved precision
-    costs nothing and halves the footprint.
-
-    The JPEG is the *conditioned source-resolution* frame, not the 518-wide one
-    the model consumed. Detection wants the sharpest pixels available, and the
-    two differ by a pure resize, so a box found at source resolution scales into
-    depth-map space by a single ratio -- no re-derivation, no drift.
-    """
     os.makedirs(frames_dir, exist_ok=True)
     for i, fid in enumerate(frame_ids):
         np.savez_compressed(
@@ -680,7 +498,7 @@ def save_frame_artifacts(frames_dir, frame_ids, raw, rgb_list):
                         [int(cv2.IMWRITE_JPEG_QUALITY), 90])
 
 def _trajectory_memory_frames(model) -> int:
-    """How many past frames the trajectory memory holds right now (0 if none)."""
+
     agg = getattr(model, "aggregator", None)
     mgr = getattr(agg, "kv_cache_manager", None)
     if mgr is not None:
@@ -691,7 +509,7 @@ def _trajectory_memory_frames(model) -> int:
     return 0
 
 def save_ply(path: str, points: np.ndarray, colors: np.ndarray) -> None:
-    """Write a binary little-endian PLY (no extra dependencies)."""
+
     header = (
         "ply\nformat binary_little_endian 1.0\n"
         f"element vertex {len(points)}\n"
@@ -708,15 +526,11 @@ def save_ply(path: str, points: np.ndarray, colors: np.ndarray) -> None:
         f.write(header.encode("ascii"))
         f.write(arr.tobytes())
 
-# =============================================================================
-# Main
-# =============================================================================
-
 def build_parser():
     parser = argparse.ArgumentParser(
         description="LingBot-Map: open-ended streaming reconstruction with a live web viewer",
     )
-    # Input
+
     parser.add_argument("--video_path", type=str, default=None)
     parser.add_argument("--image_folder", type=str, default=None)
     parser.add_argument("--fps", type=float, default=10.0,
@@ -727,7 +541,6 @@ def build_parser():
     parser.add_argument("--loop", action="store_true",
                         help="Replay the source forever -- the memory-stability soak test")
 
-    # Model
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--image_size", type=int, default=518)
     parser.add_argument("--patch_size", type=int, default=14)
@@ -735,7 +548,6 @@ def build_parser():
     parser.add_argument("--use_sdpa", action=argparse.BooleanOptionalAction, default=None,
                         help="SDPA attention backend. Default: auto (SDPA unless FlashInfer imports)")
 
-    # Bounded context -- the knobs that make this open-ended
     parser.add_argument("--max_context_frames", type=int, default=256,
                         help="Cap on trajectory-memory frames each frame may attend to. "
                              "-1 disables the cap and lets KV memory grow without bound")
@@ -763,7 +575,6 @@ def build_parser():
                         help="3D-RoPE position table size, counted in KEYFRAMES. Costs ~512 B "
                              "per slot; the run stops when keyframes reach it")
 
-    # Bounded map
     parser.add_argument("--max_points", type=int, default=3_000_000,
                         help="Hard ceiling on points kept in the global map (~19 B each)")
     parser.add_argument("--fuse", default="latest", choices=["latest", "average"],
@@ -784,7 +595,6 @@ def build_parser():
                              "confidence collapses toward 1.0 (fisheye / action cams) "
                              "and --conf_threshold would drop every point. 0 = off")
 
-    # Source conditioning -- for footage the model was not trained for
     parser.add_argument("--crop", type=float, default=1.0,
                         help="Center-crop this fraction of each source frame before "
                              "preprocessing. Drops burned-in OSD and the worst lens distortion")
@@ -819,7 +629,6 @@ def build_parser():
                              "this catches hazy horizons at the cost of bright walls")
     parser.add_argument("--compact_every", type=int, default=30)
 
-    # Viewer
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--point_size", type=float, default=0.004)
     parser.add_argument("--vis_every", type=int, default=5,
@@ -845,7 +654,7 @@ def main():
 
     if args.use_sdpa is None:
         try:
-            import flashinfer  # noqa: F401
+            import flashinfer
             args.use_sdpa = False
         except ImportError:
             args.use_sdpa = True
@@ -871,9 +680,7 @@ def main():
     win_sec = args.kv_cache_sliding_window * kf / max(args.fps, 1e-6)
     anchor_sec = args.num_scale_frames * max(1, args.anchor_stride) / max(args.fps, 1e-6)
     mem_sec = args.max_context_frames * kf / max(args.fps, 1e-6)
-    # Memory is bounded in frames, but what the model can actually reason about is
-    # bounded in *seconds of scene*, and raising --fps shrinks the second figure
-    # while leaving the first untouched. Print both so the trade is visible.
+
     span = (f"Context in wall-clock terms: anchor {anchor_sec:.1f}s, "
             f"local window {win_sec:.1f}s")
     if args.max_context_frames > 0:
@@ -893,7 +700,7 @@ def main():
     gc.collect()
 
     if torch.cuda.is_available():
-        # build_model already cast the aggregator; this just picks the autocast dtype.
+
         dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
     else:
         dtype = torch.float32
@@ -978,10 +785,6 @@ def main():
     t_window = time.time()
     fps_est = 0.0
 
-    # ---- Phase 1: anchor frames, processed together (bidirectional) ----
-    # anchor_stride spaces these out in time. Frame count is what bounds memory,
-    # but parallax is what makes the anchor mean anything, and the two pull in
-    # opposite directions as --fps rises.
     anchor_stride = max(1, args.anchor_stride)
     scale_frames, scale_rgb = [], []
     consumed = 0
@@ -1014,8 +817,7 @@ def main():
     del out
 
     if want_artifacts:
-        # Anchor frames are the highest-confidence views in the whole run, so they
-        # are worth keeping densely regardless of --artifact_every.
+
         ids = list(range(scale_n))
         save_frame_artifacts(art_frames_dir, ids, raw, scale_rgb)
         saved_ids.extend(ids)
@@ -1024,8 +826,7 @@ def main():
         voxel = args.voxel_size
         print(f"Voxel size: {voxel:.5f}")
     else:
-        # Scale the voxel to the scene the anchor frames actually saw, so the
-        # point budget is spent at a sensible resolution whatever the metric scale.
+
         if len(pts):
             lo, hi = np.percentile(pts, [5, 95], axis=0)
             extent = float(np.linalg.norm(hi - lo))
@@ -1047,7 +848,7 @@ def main():
     del scale_batch, pts, cols
 
     def cam_pose(extr):
-        """Camera rotation/position in world, via the demo's own convention."""
+
         c2w = closed_form_inverse_se3(extr[None])[0]
         return c2w[:3, :3], c2w[:3, 3]
 
@@ -1056,7 +857,6 @@ def main():
         p, c = point_map.snapshot()
         viewer.update(p, c, R, t, fov, aspect, frames=frame_idx)
 
-    # ---- Phase 2: one frame at a time, consumed immediately ----
     print("Streaming... (Ctrl-C to stop and keep the viewer up)")
     for tensor, rgb in source:
         if stop["flag"]:
@@ -1114,7 +914,6 @@ def main():
                   f"(dropped {point_map.dropped:,}) | "
                   f"traj-mem {_trajectory_memory_frames(model)} frames")
 
-    # ---- Done ----
     elapsed = time.time() - t_start
     p, c = point_map.snapshot()
     print(f"\nProcessed {frame_idx} frames in {elapsed:.1f}s "

@@ -1,26 +1,4 @@
-"""Find plants in reconstructed frames and place them as 3D objects in the map.
 
-Runs entirely off the artifacts written by ``stream_video.py --save_artifacts``,
-so it never reloads the reconstruction model and can be re-run freely while you
-tune prompts and thresholds.
-
-Pipeline per selected frame:
-  1. OWLv2 open-vocabulary detection against plant text prompts -> boxes.
-     Open-vocabulary matters here: a fixed-class detector would only offer COCO's
-     single "potted plant", while the prompt list can name hedges, shrubs and
-     flowering plants separately and be edited without retraining anything.
-  2. Each box's pixels are back-projected through that frame's own depth map and
-     pose -- the same call the point cloud uses -- so a detection becomes a
-     cluster of real 3D points rather than a ray guess.
-  3. The crop goes to a classifier for a species name (BioCLIP locally, or the
-     Pl@ntNet API if you opt in).
-
-Detections from different frames are then clustered in 3D, because one plant seen
-from twenty viewpoints should end up as one object. Each cluster keeps a
-confidence-weighted vote over species, the union of its boxes, and its best crop.
-
-Output: ``plants.json`` plus a ``crops/`` directory, both consumed by view_map.py.
-"""
 
 import argparse
 import json
@@ -34,14 +12,6 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lingbot_map.utils.geometry import unproject_depth_map_to_point_map
 
-# =============================================================================
-# Candidate species for zero-shot classification
-# =============================================================================
-
-# BioCLIP is a CLIP model: it scores an image against a *closed* list of text
-# labels, so it can only ever return something named here. This list covers
-# common North American suburban / garden planting; override it with
-# --species_list (one "Scientific name|Common name" per line) for other settings.
 DEFAULT_SPECIES = [
     ("Chrysanthemum morifolium", "florist's daisy"),
     ("Hydrangea macrophylla", "bigleaf hydrangea"),
@@ -100,16 +70,12 @@ DEFAULT_PROMPTS = [
     "a tree", "a flowering plant", "a leafy green plant",
 ]
 
-# =============================================================================
-# Artifact access
-# =============================================================================
-
 def load_meta(art_dir):
     with open(os.path.join(art_dir, "meta.json"), encoding="utf-8") as f:
         return json.load(f)
 
 def load_frame(art_dir, fid):
-    """Return (depth, conf, extrinsic, intrinsic, rgb) for one saved frame."""
+
     d = np.load(os.path.join(art_dir, "frames", f"{fid:06d}.npz"))
     jpg = os.path.join(art_dir, "frames", f"{fid:06d}.jpg")
     rgb = None
@@ -119,13 +85,7 @@ def load_frame(art_dir, fid):
             d["extrinsic"], d["intrinsic"], rgb)
 
 def source_to_model_transform(src_hw, model_hw, patch_size=14):
-    """Map source-resolution pixel coords onto the model's depth-map grid.
 
-    ``preprocess_frame`` fixes width and rounds height to a patch multiple, then
-    center-crops anything taller than image_size. Both steps are reproduced here
-    rather than assumed, because a silent half-crop offset would shift every box
-    by tens of pixels and quietly poison the 3D positions.
-    """
     hs, ws = src_hw
     hm, wm = model_hw
     scale = wm / ws
@@ -133,12 +93,7 @@ def source_to_model_transform(src_hw, model_hw, patch_size=14):
     y_off = (resized_h - hm) // 2 if resized_h > hm else 0
     return scale, y_off
 
-# =============================================================================
-# Detection
-# =============================================================================
-
 class Owlv2Detector:
-    """Open-vocabulary box detector. Prompts are plain English, editable at will."""
 
     def __init__(self, model_dir, device, threshold=0.15):
         from transformers import Owlv2Processor, Owlv2ForObjectDetection
@@ -165,7 +120,6 @@ class Owlv2Detector:
         return boxes, scores, labels
 
 class BioClipClassifier:
-    """Zero-shot species naming from a fixed candidate list."""
 
     def __init__(self, model_dir, device, species):
         import open_clip
@@ -176,8 +130,7 @@ class BioClipClassifier:
         self.tokenizer = open_clip.get_tokenizer("ViT-B-16")
         self.device = device
         self.species = species
-        # BioCLIP was trained with taxonomic strings paired to vernacular names;
-        # matching that phrasing at inference is worth a few points of accuracy.
+
         texts = [f"a photo of {sci} with common name {com}." for sci, com in species]
         with torch.no_grad():
             tok = self.tokenizer(texts).to(device)
@@ -195,7 +148,7 @@ class BioClipClassifier:
         return [(self.species[i][0], self.species[i][1], float(probs[i])) for i in idx]
 
     def probs(self, crops):
-        """The full candidate distribution for each crop, in one forward pass."""
+
         from PIL import Image
         batch = torch.stack([self.preprocess(Image.fromarray(c)) for c in crops])
         with torch.no_grad():
@@ -208,7 +161,7 @@ class BioClipClassifier:
         return per.cpu().numpy(), fused.cpu().numpy()
 
     def classify_views(self, crops, topk=5):
-        """Fused answer plus the per-view distribution it was averaged from."""
+
         if not crops:
             return None
         per, fused = self.probs(crops)
@@ -230,7 +183,7 @@ class BioClipClassifier:
         }
 
     def classify_many(self, crops, topk=3):
-        """One answer from several views of the same individual."""
+
         from PIL import Image
         if not crops:
             return []
@@ -245,7 +198,6 @@ class BioClipClassifier:
         return [(self.species[i][0], self.species[i][1], float(probs[i])) for i in idx]
 
 class PlantNetClassifier:
-    """Pl@ntNet API. Uploads each crop to an external service -- opt-in only."""
 
     BASE = "https://my-api.plantnet.org/v2/identify"
     PROJECT = "k-world-flora"
@@ -273,10 +225,10 @@ class PlantNetClassifier:
             results = r.json().get("results", [])[:topk]
         except requests.HTTPError as exc:
             if exc.response is not None and exc.response.status_code == 404:
-                return []                                 # nothing matched
+                return []
             print(f"    Pl@ntNet request failed: {exc}")
             return []
-        except Exception as exc:                      # network / quota / auth
+        except Exception as exc:
             print(f"    Pl@ntNet request failed: {exc}")
             return []
         return self._parse(results)
@@ -292,7 +244,7 @@ class PlantNetClassifier:
         return out
 
     def classify_many(self, crops, topk=3, organs=None):
-        """Identify one plant from up to five images in a single request."""
+
         import requests
         crops = [c for c in crops if c is not None and c.size][:5]
         if not crops:
@@ -319,14 +271,7 @@ class PlantNetClassifier:
             return []
 
 def nms_2d(boxes, scores, labels, iou_threshold=0.5):
-    """Class-agnostic non-maximum suppression within one frame.
 
-    The prompt list deliberately overlaps -- "a bush", "a shrub" and "a flowering
-    plant" all describe the same object -- so a single plant fires several
-    prompts and arrives as several boxes. Left alone those become separate 3D
-    instances downstream. Suppression is class-agnostic precisely because the
-    duplicates carry *different* labels; per-class NMS would keep every one.
-    """
     if len(boxes) == 0:
         return boxes, scores, labels
     x0, y0, x1, y1 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
@@ -348,12 +293,7 @@ def nms_2d(boxes, scores, labels, iou_threshold=0.5):
     return boxes[keep], scores[keep], [labels[i] for i in keep]
 
 def vegetation_fraction(crop_rgb):
-    """Share of a crop that reads as vegetation, by excess green (2G - R - B).
 
-    Cheap sanity check on what the detector claimed: a garage door or a parked
-    car prompted as "a shrub" has essentially no green, and this rejects it
-    without another model in the loop.
-    """
     if crop_rgb.size == 0:
         return 0.0
     f = crop_rgb.astype(np.float32)
@@ -361,7 +301,7 @@ def vegetation_fraction(crop_rgb):
     return float((exg > 8.0).mean())
 
 def upscale_crop(crop_rgb, min_side=224, max_factor=4.0):
-    """Enlarge a small crop with a good filter before the classifier shrinks it."""
+
     if crop_rgb is None or crop_rgb.size == 0:
         return crop_rgb
     h, w = crop_rgb.shape[:2]
@@ -375,7 +315,7 @@ def upscale_crop(crop_rgb, min_side=224, max_factor=4.0):
                       interpolation=cv2.INTER_LANCZOS4)
 
 def stack_crops(crops, max_shift=0.25, min_corr=0.6):
-    """Average several views of one plant into a lower-noise composite."""
+
     if not crops:
         return None
     ref = crops[0]
@@ -407,17 +347,7 @@ def stack_crops(crops, max_shift=0.25, min_corr=0.6):
     return np.clip(acc / used, 0, 255).astype(np.uint8)
 
 def foliage_subcrop(crop_rgb, min_frac=0.04, min_keep_frac=0.35):
-    """Narrow a detection crop down to its actual vegetation before classifying.
 
-    A "potted plant" box is mostly pot, and a species classifier fed that image
-    is largely reading terracotta -- which is exactly how you get an olive tree
-    out of a chrysanthemum. Excess-green (2G - R - B) is a standard vegetation
-    index and needs no extra model; the largest green component's bounding box
-    is a good approximation of "the leafy part".
-
-    Falls back to the full crop when there is too little green to trust, so a
-    bare-branch or heavily shadowed plant is not reduced to noise.
-    """
     if crop_rgb.size == 0:
         return crop_rgb
     f = crop_rgb.astype(np.float32)
@@ -439,47 +369,15 @@ def foliage_subcrop(crop_rgb, min_frac=0.04, min_keep_frac=0.35):
     x0 = max(0, x - pad_x); x1 = min(crop_rgb.shape[1], x + w + pad_x)
     sub = crop_rgb[y0:y1, x0:x1]
 
-    # Decline to narrow when the green region is only a speck of the box.
-    #
-    # Excess-green picks the wrong region whenever foliage is not green, and on
-    # analog FPV video it often is not -- measured on this footage the leaves
-    # average more blue than green (RGB 66/95/108). The failure is not visible by
-    # comparing greenness, because the index is wrong but self-consistent: the
-    # region it picks really is the greenest thing present, it just is not the
-    # plant. What does show it is *size*. A detector asserted this box is mostly
-    # plant; a mask that keeps a median 19% of it is contradicting the more
-    # reliable of the two. Feeding those specks to a classifier cost a measured
-    # 3x in score (mean top-1 0.017 against 0.052 for the whole crop).
     area = sub.shape[0] * sub.shape[1]
     if sub.size == 0 or area < min_keep_frac * crop_rgb.shape[0] * crop_rgb.shape[1]:
         return crop_rgb
     return sub
 
-# =============================================================================
-# 2D detection -> 3D object
-# =============================================================================
-
 def lift_box_to_3d(box_src, world, conf, rgb_model, scale, y_off,
                    conf_threshold, min_points, use_vegetation=True,
                    max_keep=2500, veg_erode=1, depth=None, depth_band=0.0):
-    """Turn one image-space box into the 3D points of the plant inside it.
 
-    Two boxes come back, because two different jobs need different answers:
-
-      `core`    a tight 15-85 percentile box. Stable across viewpoints, so it is
-                what drives clustering and the merge radius.
-      `display` a generous 1-99 percentile box covering the whole object, which
-                is what gets drawn.
-
-    Earlier this returned only the tight box and drew that, which is why the
-    highlight covered a fraction of the plant.
-
-    Background rejection is done by vegetation colour rather than by shrinking
-    the box. Shrinking discards the plant's outer foliage -- exactly the part
-    that makes the extent correct -- while still admitting whatever wall sits in
-    the middle of the box. An excess-green test keeps the silhouette and drops
-    the driveway behind it.
-    """
     hm, wm = conf.shape[:2]
     x0, y0, x1, y1 = box_src
     mx0 = int(np.clip(round(x0 * scale), 0, wm - 1))
@@ -497,26 +395,7 @@ def lift_box_to_3d(box_src, world, conf, rgb_model, scale, y_off,
         sub = rgb_model[my0:my1, mx0:mx1].astype(np.float32)
         exg = (2.0 * sub[:, :, 1] - sub[:, :, 0] - sub[:, :, 2]).reshape(-1)
         veg = exg > 8.0
-        # Trust the colour filter, or reject the box -- but never fall back to
-        # keeping everything.
-        #
-        # This used to apply the mask only when it retained 15% of the box, on the
-        # reasoning that shadowed foliage can fail excess-green outright. The
-        # fallback was backwards: a box that is nine parts terracotta fountain to
-        # one part shrub fails that test, and the old branch then kept the whole
-        # box, so the fountain became plant. A box whose colour says there is
-        # almost no plant in it should contribute almost nothing, and if what
-        # survives is too thin to measure, the detection should not contribute at
-        # all. The outer --min_vegetation gate already ensures anything reaching
-        # here is at least a few percent vegetation.
-        # Erode the vegetation mask before using it. A pixel can look like leaf
-        # and still carry the depth of the fence behind it: depth is blurry
-        # exactly at object boundaries, so the outline of a shrub back-projects
-        # onto whatever it is standing in front of. Those boundary points are
-        # what put a terracotta fountain and a stucco wall inside plant
-        # instances, and they survive every later filter because the wall is
-        # seen from as many views as the shrub is. Dropping a rim of pixels
-        # costs a little of the silhouette and removes the smear.
+
         if veg_erode > 0:
             vm = veg.reshape(my1 - my0, mx1 - mx0).astype(np.uint8)
             k = 2 * int(veg_erode) + 1
@@ -527,20 +406,7 @@ def lift_box_to_3d(box_src, world, conf, rgb_model, scale, y_off,
         keep = keep & veg
 
     if depth is not None and depth_band > 0:
-        # Keep the nearest coherent depth layer in the box, and drop the rest.
-        #
-        # A detection box around a shrub in front of a wall contains both, and on
-        # this footage colour cannot tell them apart: measured on real frames,
-        # excess-green passes 74% of stucco wall against 69% of foliage, because
-        # analog chroma noise renders the leaves blue-purple (mean RGB 66/95/108,
-        # more blue than green). The index is not merely weak here, it is
-        # inverted.
-        #
-        # Range still separates them cleanly, and needs no assumption about what
-        # a plant looks like: the plant is in front. Take the depth histogram
-        # inside the box, walk to the nearest bin carrying real mass, and keep the
-        # band around it -- nearest-with-mass rather than the global mode, since
-        # the wall behind often covers more pixels than the plant does.
+
         d_all = depth[my0:my1, mx0:mx1].reshape(-1)
         d_keep = d_all[keep]
         if len(d_keep) >= min_points:
@@ -560,7 +426,7 @@ def lift_box_to_3d(box_src, world, conf, rgb_model, scale, y_off,
         return None
 
     centroid = np.median(pts, axis=0)
-    # One robust pass against depth's long far tail, then measure.
+
     d = np.linalg.norm(pts - centroid, axis=1)
     pts = pts[d < np.percentile(d, 97)]
     if len(pts) < min_points:
@@ -584,16 +450,7 @@ def lift_box_to_3d(box_src, world, conf, rgb_model, scale, y_off,
     }
 
 def instance_stats(members):
-    """Summarize one cluster from its members, using statistics that do not drift.
 
-    The box is the *median* of member boxes and `typ_diag` the median member
-    diagonal -- deliberately not the union. A union grows every time a member is
-    added, and when the merge radius is derived from object size (as it must be,
-    to absorb drift that scales with the object) a growing box widens the radius,
-    which admits more members, which grows the box again. That runaway collapsed
-    a whole courthouse plaza into a single "plant". Medians stay put as views
-    accumulate, because every view is measuring the same object.
-    """
     w = np.array([m["score"] for m in members], dtype=np.float64)
     pos = np.stack([m["centroid"] for m in members])
     centroid = (pos * w[:, None]).sum(0) / max(w.sum(), 1e-9)
@@ -605,27 +462,7 @@ def instance_stats(members):
     return centroid, lo, hi, typ_diag
 
 def multiview_support_filter(members, cell, min_support, min_points=40):
-    """Keep only the 3D points that independent viewpoints agree on.
 
-    A detection box always contains more than its object: background seen around
-    and between the leaves, and -- worse -- reconstruction floaters, little slabs
-    of geometry hallucinated in mid-air where the depth model was unsure. A
-    floater sitting at roughly the plant's distance passes every single-frame
-    test there is. It is at plausible depth, it has high depth-confidence, and
-    on this footage it passes the vegetation gate too, because a tan stucco
-    artifact (RGB 115/106/75) scores +22 on excess green.
-
-    What a floater cannot do is survive parallax. It is an artifact of one
-    viewpoint, so as the camera moves it fails to land in the same place twice,
-    while the plant's real surface is voted for again and again. Counting how
-    many *distinct frames* put a point in each voxel separates the two without
-    assuming anything about colour -- which matters here, since the plant's
-    leaves are bronze-pink and colour tells us nothing.
-
-    Skipped when the instance has too few views to vote, and abandoned if it
-    would leave too little behind, so a genuinely sparsely-seen plant is not
-    filtered out of existence.
-    """
     pts = [m["points"] for m in members]
     allp = np.concatenate(pts, axis=0)
     frames = np.array([m["frame"] for m in members])
@@ -638,7 +475,6 @@ def multiview_support_filter(members, cell, min_support, min_points=40):
     key = (q[:, 0] * span[1] + q[:, 1]) * span[2] + q[:, 2]
     per_point_frame = np.repeat(frames, [len(p) for p in pts])
 
-    # Distinct (voxel, frame) pairs, then how many frames each voxel collected.
     pairs = np.unique(np.stack([key, per_point_frame], axis=1), axis=0)
     ukeys, counts = np.unique(pairs[:, 0], return_counts=True)
     support = counts[np.searchsorted(ukeys, key)]
@@ -649,13 +485,7 @@ def multiview_support_filter(members, cell, min_support, min_points=40):
     return allp[keep], int((~keep).sum())
 
 def display_box(members, pct=1.0, support_cell=0.0, min_support=1):
-    """The drawn extent: percentile bounds over every point from every view.
 
-    Pooling views is the point -- no single viewpoint sees the whole plant, so a
-    box from one view (or the median of such boxes) is necessarily smaller than
-    the object. Percentiles rather than min/max keep a few stray reprojections
-    from inflating it.
-    """
     pts, dropped = multiview_support_filter(members, support_cell, min_support)
     lo = np.percentile(pts, pct, axis=0)
     hi = np.percentile(pts, 100.0 - pct, axis=0)
@@ -667,7 +497,7 @@ def make_instance(members):
             "typ_diag": typ}
 
 def cluster_detections(dets, cluster_dist):
-    """Greedy seeding pass: highest-scoring detections anchor clusters."""
+
     order = sorted(range(len(dets)), key=lambda i: -dets[i]["score"])
     instances = []
     for i in order:
@@ -686,7 +516,7 @@ def cluster_detections(dets, cluster_dist):
     return instances
 
 def box_iou_3d(a_min, a_max, b_min, b_max):
-    """Axis-aligned 3D IoU."""
+
     lo = np.maximum(a_min, b_min)
     hi = np.minimum(a_max, b_max)
     inter = np.prod(np.clip(hi - lo, 0, None))
@@ -697,18 +527,7 @@ def box_iou_3d(a_min, a_max, b_min, b_max):
     return float(inter / (va + vb - inter))
 
 def merge_affinity(a, b, iou_threshold, sep_frac):
-    """How strongly two instances look like the same physical plant.
 
-    Two tests, either sufficient:
-      * 3D box IoU above threshold -- they occupy the same space.
-      * centroids closer than `sep_frac` x the larger box's diagonal -- they are
-        nearer to each other than the object's own size.
-
-    The second test is what handles reconstruction drift. Depth here is only
-    weakly confident, so one static plant back-projects to slightly different
-    places from different viewpoints; the spread is a fraction of the object
-    rather than a fixed distance, so the criterion has to scale with the object.
-    """
     iou = box_iou_3d(a["min"], a["max"], b["min"], b["max"])
     if iou > iou_threshold:
         return 1.0 + iou
@@ -719,7 +538,7 @@ def merge_affinity(a, b, iou_threshold, sep_frac):
     return 0.0
 
 def merge_overlapping(instances, iou_threshold, sep_frac):
-    """Agglomerate clusters that describe the same physical plant."""
+
     changed = True
     while changed and len(instances) > 1:
         changed = False
@@ -740,7 +559,7 @@ def merge_overlapping(instances, iou_threshold, sep_frac):
     return instances
 
 def crop_sharpness(crop_rgb):
-    """Scale-invariant, contrast-normalised sharpness. Higher is less blurred."""
+
     if crop_rgb.size == 0:
         return 0.0
     g = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
@@ -748,7 +567,7 @@ def crop_sharpness(crop_rgb):
     return float(cv2.Laplacian(g, cv2.CV_32F).var() / (g.var() + 1e-6))
 
 def crop_quality(crop_rgb):
-    """How much a crop is worth showing a species classifier."""
+
     if crop_rgb.size == 0:
         return 0.0
     g = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2GRAY)
@@ -760,7 +579,7 @@ def crop_quality(crop_rgb):
 
 def crop_from_instance(art_dir, fid, points_3d, model_hw, pad=0.10,
                        lo_pct=3.0, hi_pct=97.0, min_px=64):
-    """Cut a crop around where this instance's own 3D points land in a frame."""
+
     try:
         depth, conf, extr, intr, rgb = load_frame(art_dir, fid)
     except (FileNotFoundError, KeyError):
@@ -797,7 +616,7 @@ def crop_from_instance(art_dir, fid, points_3d, model_hw, pad=0.10,
     return rgb[sy0:sy1, sx0:sx1]
 
 def vote_label(members, key):
-    """Confidence-weighted vote across every view of one plant."""
+
     tally = {}
     for m in members:
         for name, score in m[key]:
@@ -808,16 +627,10 @@ def vote_label(members, key):
         return None, 0.0, 0.0
     total = sum(tally.values())
     name = max(tally, key=tally.get)
-    # The normalized share says which candidate won; the raw score says whether
-    # the classifier believed any of them. A closed-set classifier always
-    # produces a confident-looking share, so the raw score is the honest signal.
+
     raws = [sc for m in members for nm, sc in m[key] if nm == name]
     raw = float(np.mean(raws)) if raws else 0.0
     return name, float(tally[name] / max(total, 1e-9)), raw
-
-# =============================================================================
-# Main
-# =============================================================================
 
 def main():
     ap = argparse.ArgumentParser(description="Detect plants and map them into the point cloud")
@@ -982,11 +795,9 @@ def main():
         print("Species   : Pl@ntNet API")
         print("            NOTE: every detected crop is uploaded to Pl@ntNet's servers.")
 
-    # ---- per-frame detection ----
     dets = []
     crops_dir = os.path.join(art, "crops")
-    # Wipe first: crop filenames are indexed per run, so a shorter run leaves the
-    # previous run's files behind to be mistaken for current output.
+
     if os.path.isdir(crops_dir):
         for fn in os.listdir(crops_dir):
             if fn.endswith(".jpg"):
@@ -997,8 +808,7 @@ def main():
         if rgb is None:
             continue
         scale, y_off = source_to_model_transform(rgb.shape[:2], model_hw)
-        # Once per frame, not once per detection -- this is the same call the
-        # point cloud uses, so the boxes land in identical coordinates.
+
         world = unproject_depth_map_to_point_map(
             depth[None], extrinsic[None], intrinsic[None])[0]
         rgb_model = cv2.resize(rgb, (model_hw[1], model_hw[0]),
@@ -1049,7 +859,6 @@ def main():
         print("\nNo detections survived. Try lowering --det_threshold or --min_points.")
         return
 
-    # ---- cluster across frames ----
     cloud = np.load(os.path.join(art, "cloud.npz"))["points"]
     lo, hi = np.percentile(cloud, [2, 98], axis=0)
     extent = float(np.linalg.norm(hi - lo))
@@ -1065,17 +874,10 @@ def main():
     instances = [i for i in instances if len(i["members"]) >= args.min_views]
     instances.sort(key=lambda i: -max(m["score"] for m in i["members"]))
 
-    # Classification runs here, not in the detection loop. One plant seen 96 times
-    # needs one identification, not 96 -- which matters for wall-clock locally and
-    # for quota when the classifier is a metered remote API.
     if classifier is not None:
         n_calls = 0
         for inst in instances:
-            # Rank by how identifiable each crop is, not by detection score --
-            # see crop_quality. Loading every crop costs a JPEG decode per
-            # detection, which is nothing next to a classifier call, and it is
-            # the difference between showing the classifier leaf texture and
-            # showing it a silhouette against the sky.
+
             pooled = np.concatenate([m["points"] for m in inst["members"]]) \
                 if args.crop_from_3d and inst["members"] else None
             if pooled is not None and len(pooled) > 4000:
@@ -1147,9 +949,7 @@ def main():
             method = "fused"
             fsci, fcom, fraw = fused[0]
             total = sum(x[2] for x in fused) or 1.0
-            # Agreement has to be measured against the name actually being
-            # reported, which is the fused one -- reusing the vote share would
-            # quietly certify the fused name with a different species' support.
+
             tops = [m["species"][0][0].split("|")[0]
                     for m in members if m.get("species")]
             agreement = (sum(t == fsci for t in tops) / len(tops)) if tops else None
@@ -1157,15 +957,10 @@ def main():
             sp_raw = fraw
             sp_conf = fraw / total
             if agreement is None:
-                # Nothing to cross-check against (a metered API classified once),
-                # so fall back to the fused margin and say so in the output.
+
                 agreement = sp_conf
                 method = "fused-unchecked"
-        # Two different questions, so two different members. How confident the
-        # detector was about this plant is a property of its best detection; which
-        # picture to show a person (and the classifier) is a property of how
-        # identifiable the crop is. Conflating them made the reported confidence
-        # follow the thumbnail.
+
         sci_top = (sp.split("|", 1)[0] if sp and "|" in sp else (sp or ""))
         dist = inst.get("species_dist") or {}
         at_fused = dist.get("at_fused") or []
@@ -1202,12 +997,7 @@ def main():
             "species_common": com,
             "species_confidence": round(sp_conf, 3),
             "species_raw_score": round(sp_raw, 4),
-            # Three independent conditions, because each catches a different way a
-            # species claim goes wrong: the classifier not believing it (raw),
-            # views disagreeing with each other (agreement), and there being too
-            # few views for either signal to mean much. On this footage the two
-            # doubtful names both rested on 2 views while the two plausible ones
-            # had 11 and 19.
+
             "species_method": method,
             "species_agreement": round(float(agreement), 3),
             "species_candidates": [
@@ -1235,9 +1025,6 @@ def main():
             "frames": sorted({int(m["frame"]) for m in members}),
         })
 
-    # The pooled points are what let the viewer highlight the plant's actual
-    # shape rather than everything inside its bounding box -- a box around a
-    # shrub in front of a wall contains a lot of wall.
     pts_path = os.path.join(art, "plant_points.npz")
     np.savez_compressed(pts_path, **{f"pts_{o['id']}": arr for o, arr in
                                      zip(out, instance_points)})
