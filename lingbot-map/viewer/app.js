@@ -1766,6 +1766,8 @@ function resetView() {
     .addScaledVector(UP, fr.radius * 0.45);
   faceToward(focus);
   setSpeed(Math.max(0.05, fr.radius * 0.35));
+  applyCamera();
+  invalidate(3);
 }
 
 let last = performance.now();
@@ -1926,6 +1928,9 @@ function drawLabels() {
 window.__dbg = () => ({
   lock: !!S.frameLock,
   anchored: S.anchored,
+  N: S.N, drawFrac: S.drawFrac, up: UP.toArray(),
+  framing: S.scene && S.scene.framing,
+  p0: S.positions ? [S.positions[0], S.positions[1], S.positions[2]] : null,
   fov: camera.fov,
   pos: cam.pos.toArray(),
   yaw: cam.yaw, pitch: cam.pitch, roll: cam.roll,

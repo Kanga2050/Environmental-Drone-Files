@@ -71,7 +71,8 @@ def frame_is_usable(rgb, min_luma, min_std):
     return float(g.mean()) >= min_luma and float(g.std()) >= min_std
 
 def iter_video_frames(video_path, fps, stride, max_frames, loop, image_size, patch_size,
-                      prep=None, min_luma=0.0, min_std=0.0, on_skip=None):
+                      prep=None, min_luma=0.0, min_std=0.0, on_skip=None,
+                      emitted_ids=None):
 
     emitted = 0
     pass_idx = 0
@@ -99,6 +100,8 @@ def iter_video_frames(video_path, fps, stride, max_frames, loop, image_size, pat
                         kept += 1
                         raw_idx += 1
                         continue
+                    if emitted_ids is not None:
+                        emitted_ids.append(raw_idx)
                     yield preprocess_frame(rgb, image_size, patch_size), rgb
                     emitted += 1
                     if max_frames and emitted >= max_frames:
@@ -563,6 +566,11 @@ def build_parser():
                              "degenerate. Set this so num_scale_frames x anchor_stride covers "
                              "several seconds of movement. Skipped frames are consumed, not "
                              "reconstructed")
+    parser.add_argument("--inject_pairs", default=None,
+                        help="JSON list of {a,b} source-frame pairs; frame a is "
+                             "replayed into context just before frame b")
+    parser.add_argument("--inject_repeat", type=int, default=1,
+                        help="How many times to replay each injected frame")
     parser.add_argument("--pin_fx", type=float, default=0.0,
                         help="Force this focal length (px on the model grid) on "
                              "every frame instead of the per-frame prediction")
@@ -742,11 +750,14 @@ def main():
                 print(f"[source] skipped unusable frame {idx} "
                       f"({_st['n']} so far)", flush=True)
 
+        src_ids = []
         source = iter_video_frames(args.video_path, args.fps, args.stride,
                                    args.max_frames, args.loop,
                                    args.image_size, args.patch_size, prep,
-                                   args.min_frame_luma, args.min_frame_std, note_skip)
+                                   args.min_frame_luma, args.min_frame_std, note_skip,
+                                   src_ids)
     else:
+        src_ids = []
         source = iter_image_folder(args.image_folder, args.stride, args.max_frames,
                                    args.loop, args.image_size, args.patch_size, prep)
 
@@ -857,8 +868,47 @@ def main():
         p, c = point_map.snapshot()
         viewer.update(p, c, R, t, fov, aspect, frames=frame_idx)
 
+    inject = {}
+    if args.inject_pairs:
+        import json as _json
+        pairs = _json.load(open(args.inject_pairs, encoding="utf-8"))
+        want = sorted({int(x["a"]) for x in pairs})
+        for x in pairs:
+            inject.setdefault(int(x["b"]), []).append(int(x["a"]))
+        cap2 = cv2.VideoCapture(args.video_path)
+        store, got = {}, 0
+        for idx in want:
+            cap2.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, bgr = cap2.read()
+            if not ok:
+                continue
+            rgb2 = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            if prep is not None:
+                rgb2 = prep(rgb2)
+            store[idx] = preprocess_frame(rgb2, args.image_size, args.patch_size)
+            got += 1
+        cap2.release()
+        print(f"Injection: {len(pairs)} pairs, {got} context frames preloaded")
+
+    def feed(t, keyframe):
+        fb = t.unsqueeze(0).unsqueeze(0).to(device)
+        if not keyframe:
+            model._set_skip_append(True)
+        with torch.no_grad(), autocast:
+            model.forward(fb, num_frame_for_scale=scale_n,
+                          num_frame_per_block=1, causal_inference=True)
+        if not keyframe:
+            model._set_skip_append(False)
+        del fb
+
     print("Streaming... (Ctrl-C to stop and keep the viewer up)")
     for tensor, rgb in source:
+        if inject:
+            here = src_ids[frame_idx] if frame_idx < len(src_ids) else -1
+            for a in inject.pop(here, []):
+                if a in store:
+                    for _ in range(max(1, args.inject_repeat)):
+                        feed(store[a], True)
         if stop["flag"]:
             break
 
@@ -940,6 +990,7 @@ def main():
             "model_hw": [int(H), int(W)],
             "num_frames": int(frame_idx),
             "saved_frame_ids": saved_ids,
+            "source_frame_ids": [int(x) for x in src_ids],
             "voxel_size": float(point_map.voxel_size),
             "conf_threshold": float(args.conf_threshold),
             "conf_percentile": float(args.conf_percentile),
