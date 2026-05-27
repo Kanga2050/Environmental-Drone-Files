@@ -80,8 +80,9 @@ def camera_up(frames):
 class MapScene:
 
     def __init__(self, art, plants_file=None, highlight_radius=2.5,
-                 max_points=0, conf_threshold=None):
+                 max_points=0, conf_threshold=None, use_seg=True):
         self.art = art
+        self.use_seg = use_seg
         t0 = time.time()
 
         cloud = np.load(os.path.join(art, "cloud.npz"))
@@ -93,6 +94,8 @@ class MapScene:
             order = rng.choice(len(pts), max_points, replace=False)
         else:
             order = rng.permutation(len(pts))
+        self.order = order
+        self.n_cloud = len(pts)
         self.points = np.ascontiguousarray(pts[order])
         self.colors = np.ascontiguousarray(cols[order])
         del pts, cols
@@ -175,6 +178,20 @@ class MapScene:
         n = len(self.points)
         self.tags = np.full(n, -1, dtype=np.int16)
         self.member = {}
+        self.seg_source = "radius"
+        seg = os.path.join(self.art, "plant_seg.npz")
+        if self.use_seg and os.path.exists(seg):
+            d = np.load(seg)
+            if (len(d["tags"]) == self.n_cloud
+                    and list(d["plant_ids"]) == [p["id"] for p in self.plants]):
+                # Learned assignment from plant_seg/segment.py.
+                self.tags = d["tags"][self.order].astype(np.int16)
+                for i, p in enumerate(self.plants):
+                    self.member[p["id"]] = np.flatnonzero(self.tags == i).astype(np.uint32)
+                self.seg_source = "point_transformer"
+                return
+            print("  plant_seg.npz does not match this cloud/plants.json; "
+                  "using the radius rule")
         path = os.path.join(self.art, "plant_points.npz")
         inst = np.load(path) if os.path.exists(path) else None
         radius = self.voxel * radius_voxels
@@ -672,6 +689,9 @@ def main():
     ap.add_argument("--highlight_radius", type=float, default=2.5,
                     help="Cloud points within this many map-voxels of a detected "
                          "plant point are tagged as that plant")
+    ap.add_argument("--seg", action=argparse.BooleanOptionalAction, default=True,
+                    help="Use the learned plant assignment in <artifacts>/plant_seg.npz "
+                         "when present (--no-seg falls back to the radius rule)")
     ap.add_argument("--max_points", type=int, default=0,
                     help="0 keeps every point; the browser subsamples with a slider")
     ap.add_argument("--classify", default="none",
@@ -685,7 +705,7 @@ def main():
     args = ap.parse_args()
 
     scene = MapScene(args.artifacts, args.plants, args.highlight_radius,
-                     args.max_points)
+                     args.max_points, use_seg=args.seg)
     if args.classify != "none":
         if args.classify == "plantnet" and not args.plantnet_api_key:
             ap.error("--classify plantnet requires --plantnet_api_key")

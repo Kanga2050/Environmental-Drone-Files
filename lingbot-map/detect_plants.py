@@ -376,7 +376,8 @@ def foliage_subcrop(crop_rgb, min_frac=0.04, min_keep_frac=0.35):
 
 def lift_box_to_3d(box_src, world, conf, rgb_model, scale, y_off,
                    conf_threshold, min_points, use_vegetation=True,
-                   max_keep=2500, veg_erode=1, depth=None, depth_band=0.0):
+                   max_keep=2500, veg_erode=1, depth=None, depth_band=0.0,
+                   depth_mode="nearest", veg_otsu=False):
 
     hm, wm = conf.shape[:2]
     x0, y0, x1, y1 = box_src
@@ -394,7 +395,15 @@ def lift_box_to_3d(box_src, world, conf, rgb_model, scale, y_off,
     if use_vegetation and rgb_model is not None:
         sub = rgb_model[my0:my1, mx0:mx1].astype(np.float32)
         exg = (2.0 * sub[:, :, 1] - sub[:, :, 0] - sub[:, :, 2]).reshape(-1)
-        veg = exg > 8.0
+        thr = 8.0
+        if veg_otsu and len(exg) > 50:
+            # Per-box threshold between foliage and its duller surroundings;
+            # in colour-shifted video most pixels pass a fixed ExG > 8.
+            e8 = np.clip(exg, -255, 255).astype(np.float32)
+            e8 = ((e8 + 255) / 2).astype(np.uint8).reshape(-1, 1)
+            t, _ = cv2.threshold(e8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            thr = max(thr, float(t) * 2 - 255)
+        veg = exg > thr
 
         if veg_erode > 0:
             vm = veg.reshape(my1 - my0, mx1 - mx0).astype(np.uint8)
@@ -415,6 +424,12 @@ def lift_box_to_3d(box_src, world, conf, rgb_model, scale, y_off,
                 hist, edges = np.histogram(d_keep, bins=32, range=(lo_d, hi_d))
                 centers = 0.5 * (edges[:-1] + edges[1:])
                 strong = np.flatnonzero(hist >= 0.15 * hist.max())
+                if depth_mode == "peak":
+                    # The depth layer holding most vegetation, so a nearer
+                    # object (a fountain, a pot) in front of the plant does
+                    # not win just by being closer.
+                    sm = np.convolve(hist, np.ones(3) / 3, mode="same")
+                    strong = np.array([int(sm.argmax())])
                 if len(strong):
                     mode = float(centers[strong[0]])
                     near = np.abs(d_all - mode) <= depth_band * max(mode, 1e-6)
@@ -732,6 +747,14 @@ def main():
     ap.add_argument("--min_vegetation", type=float, default=0.06,
                     help="Reject a detection whose crop is less than this fraction "
                          "vegetation (excess-green). Kills non-plant false positives")
+    ap.add_argument("--max_box_frac", type=float, default=0.6,
+                    help="Ignore detection boxes covering more than this fraction of the "
+                         "frame: they do not say which plant is meant (1 keeps all)")
+    ap.add_argument("--depth_mode", default="peak", choices=["peak", "nearest"],
+                    help="Lift points from the depth layer with the most vegetation "
+                         "(peak) or from the nearest strong layer (nearest, the old rule)")
+    ap.add_argument("--veg_otsu", action=argparse.BooleanOptionalAction, default=True,
+                    help="Raise the per-box vegetation threshold with Otsu's method")
     ap.add_argument("--depth_band", type=float, default=0.25,
                     help="Keep only points within this relative depth of the nearest "
                          "coherent layer in each detection box, dropping the wall or "
@@ -820,8 +843,13 @@ def main():
 
         kept = 0
         rejected_veg = 0
+        rejected_big = 0
         for box, score, label in zip(boxes, scores, labels):
             x0, y0, x1, y1 = [int(round(v)) for v in box]
+            frac = max(0, x1 - x0) * max(0, y1 - y0) / float(rgb.shape[0] * rgb.shape[1])
+            if frac > args.max_box_frac:
+                rejected_big += 1
+                continue
             crop = rgb[max(0, y0):y1, max(0, x0):x1]
             if crop.size == 0:
                 continue
@@ -833,7 +861,8 @@ def main():
                                  conf_threshold, args.min_points,
                                  use_vegetation=args.vegetation_mask,
                                  veg_erode=args.veg_erode,
-                                 depth=depth, depth_band=args.depth_band)
+                                 depth=depth, depth_band=args.depth_band,
+                                 depth_mode=args.depth_mode, veg_otsu=args.veg_otsu)
             if geo is None:
                 continue
             crop_name = f"{fid:06d}_{kept}.jpg"
@@ -853,7 +882,8 @@ def main():
             kept += 1
         print(f"  [{n + 1}/{len(frame_ids)}] frame {fid}: {n_raw} raw -> "
               f"{n_nms} after NMS -> {kept} lifted "
-              f"({rejected_veg} rejected as non-vegetation)", flush=True)
+              f"({rejected_veg} rejected as non-vegetation, {rejected_big} as "
+              f"covering most of the frame)", flush=True)
 
     if not dets:
         print("\nNo detections survived. Try lowering --det_threshold or --min_points.")
@@ -1023,6 +1053,8 @@ def main():
             "detection_score": round(float(best["score"]), 3),
             "crop": best_crop["crop"],
             "frames": sorted({int(m["frame"]) for m in members}),
+            "boxes": [{"frame": int(m["frame"]), "box": m["box_src"], "crop": m["crop"]}
+                      for m in members],
         })
 
     pts_path = os.path.join(art, "plant_points.npz")
