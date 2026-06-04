@@ -280,6 +280,8 @@ def main():
     ap.add_argument("--photo_side", type=int, default=640,
                     help="Longest side of embedded frame photos (0 = no photos)")
     ap.add_argument("--highlight_radius", type=float, default=2.5)
+    ap.add_argument("--min_conf", type=float, default=None,
+                    help="Default 'min detection conf' filter (the page's own default is 0.15)")
     args = ap.parse_args()
 
     t0 = time.time()
@@ -324,6 +326,8 @@ def main():
                "the depth-map hotkey")
     js = re.sub(r"Start the viewer with\s*<code>--classify bioclip</code> to enable identification\.",
                 "Identification needs the live viewer.", js)
+    if args.min_conf is not None:
+        js = patch(js, "  conf: 0.15,", f"  conf: {args.min_conf},", "the default confidence")
 
     html = open(os.path.join(WEB, "index.html"), encoding="utf-8").read()
     css = open(os.path.join(WEB, "style.css"), encoding="utf-8").read()
@@ -333,6 +337,11 @@ def main():
     for el in ("showSeen", "showOwn"):
         html = patch(html, f'<input id="{el}" type="checkbox">',
                      f'<input id="{el}" type="checkbox"{off_title}>', el)
+    if args.min_conf is not None:
+        html = patch(html, '<b id="confVal">0.15</b>', f'<b id="confVal">{args.min_conf:.2f}</b>',
+                     "the confidence label")
+        html = patch(html, 'step="0.01" value="0.15">', f'step="0.01" value="{args.min_conf}">',
+                     "the confidence slider")
     html = patch(html, '<link rel="stylesheet" href="/static/style.css">',
                  f"<style>\n{css}\n</style>", "the stylesheet")
     html = re.sub(r'<script type="importmap">.*?</script>',
