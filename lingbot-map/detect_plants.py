@@ -119,6 +119,31 @@ class Owlv2Detector:
         labels = [prompts[i] for i in res["labels"].detach().cpu().numpy()]
         return boxes, scores, labels
 
+class YoloDetector:
+    """Plant/tree box detector trained by plant_det/train_det.py (no prompts)."""
+
+    def __init__(self, weights, device, threshold=0.25, imgsz=640, tta=False):
+        from ultralytics import YOLO, RTDETR
+        # several comma-separated weights = an ensemble; their boxes are pooled
+        # and the usual NMS afterwards merges the duplicates
+        self.models = [(RTDETR if "rtdetr" in w.lower() else YOLO)(w)
+                       for w in weights.split(",")]
+        self.device = device
+        self.threshold = threshold
+        self.imgsz = imgsz
+        self.tta = tta
+
+    def __call__(self, rgb, prompts=None):
+        boxes, scores, labels = [], [], []
+        for m in self.models:
+            r = m.predict(rgb[:, :, ::-1], imgsz=self.imgsz, conf=self.threshold,
+                          iou=0.5, agnostic_nms=True, device=self.device, augment=self.tta,
+                          verbose=False)[0]
+            boxes.append(r.boxes.xyxy.cpu().numpy())
+            scores.append(r.boxes.conf.cpu().numpy())
+            labels += [r.names[int(c)] for c in r.boxes.cls.cpu().numpy()]
+        return np.concatenate(boxes), np.concatenate(scores), labels
+
 class BioClipClassifier:
 
     def __init__(self, model_dir, device, species):
@@ -661,7 +686,16 @@ def main():
                     help="Use every Nth saved frame")
     ap.add_argument("--max_frames", type=int, default=0)
 
-    ap.add_argument("--classifier", default="bioclip", choices=["bioclip", "plantnet", "none"])
+    ap.add_argument("--classifier", default="bioclip",
+                    choices=["bioclip", "plantnet", "hier", "zeroshot", "none"])
+    ap.add_argument("--detector", default="owlv2", choices=["owlv2", "yolo"])
+    ap.add_argument("--det_weights", default=None, help="--detector yolo: trained weights")
+    ap.add_argument("--det_imgsz", type=int, default=640)
+    ap.add_argument("--det_tta", action="store_true", help="flip/scale test-time augmentation")
+    ap.add_argument("--cls_weights", default=None, help="--classifier hier: checkpoint")
+    ap.add_argument("--tau", default=None,
+                    help="--classifier hier: confidence needed to name a rank "
+                         "(a number, or a JSON file of per-rank values)")
     ap.add_argument("--plantnet_project", default=PlantNetClassifier.PROJECT,
                     help="Pl@ntNet flora to search. Regional floras score far "
                          "better than 'all' because they exclude species that "
@@ -774,6 +808,9 @@ def main():
     ap.add_argument("--min_views", type=int, default=2,
                     help="Discard instances seen in fewer than this many frames")
     args = ap.parse_args()
+    if args.tau is not None:
+        args.tau = (json.load(open(args.tau)) if str(args.tau).endswith(".json")
+                    else float(args.tau))
 
     art = args.artifacts
     meta = load_meta(art)
@@ -792,8 +829,13 @@ def main():
     print(f"Prompts   : {prompts}")
     print(f"Device    : {args.device}")
 
-    detector = Owlv2Detector(os.path.join(args.models_dir, "owlv2"),
-                             args.device, args.det_threshold)
+    if args.detector == "yolo":
+        detector = YoloDetector(args.det_weights, args.device, args.det_threshold,
+                                args.det_imgsz, args.det_tta)
+        print(f"Detector  : {args.det_weights} (trained plant/tree boxes, no prompts)")
+    else:
+        detector = Owlv2Detector(os.path.join(args.models_dir, "owlv2"),
+                                 args.device, args.det_threshold)
 
     species = DEFAULT_SPECIES
     if args.species_list:
@@ -809,6 +851,19 @@ def main():
         classifier = BioClipClassifier(os.path.join(args.models_dir, "bioclip"),
                                        args.device, species)
         print(f"Species   : BioCLIP zero-shot over {len(species)} candidates (local)")
+    elif args.classifier == "hier":
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from plant_det.hier import HierClassifier
+        classifier = HierClassifier(args.cls_weights, args.device, args.tau)
+        print(f"Species   : hierarchical {args.cls_weights} (tau {classifier.tau})")
+    elif args.classifier == "zeroshot":
+        from plant_det.hier import ZeroShotClassifier
+        tj = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(args.cls_weights))),
+                          "cls_runs", "tau_zeroshot_bioclip2.json")
+        tau = args.tau if args.tau is not None else (
+            json.load(open(tj)) if os.path.exists(tj) else 0.5)
+        classifier = ZeroShotClassifier(args.cls_weights, "bioclip2", args.device, tau)
+        print(f"Species   : BioCLIP-2 zero-shot hierarchy over {args.cls_weights}")
     elif args.classifier == "plantnet":
         if not args.plantnet_api_key:
             ap.error("--classifier plantnet requires --plantnet_api_key")
@@ -940,7 +995,14 @@ def main():
                 if comp is not None:
                     views = [comp] + views[1:]
 
-            if args.fuse_views and hasattr(classifier, "classify_views"):
+            if args.classifier in ("hier", "zeroshot"):
+                if views:
+                    inst["hier"] = classifier.classify_views(views)
+                    for (q, m, _), pv in zip(chosen, inst["hier"]["per_view"]):
+                        name = pv[pv["level"]][0] if pv["level"] != "plant" else "plant"
+                        m["species"] = [(f"{name}|", 1.0)]
+                n_calls += 1
+            elif args.fuse_views and hasattr(classifier, "classify_views"):
                 dist = classifier.classify_views(views, topk=5)
                 if dist:
                     inst["species_fused"] = dist["fused"]
@@ -1019,6 +1081,38 @@ def main():
             inst_pts = inst_pts[sel]
         instance_points.append(inst_pts.astype(np.float32))
         sci, com = (sp.split("|", 1) if sp and "|" in sp else (sp or "", ""))
+        hier = inst.get("hier")
+        hier_out = None
+        if hier is not None:
+            lv = hier["level"]
+            hier_out = {r: {"name": hier[r][0], "conf": round(hier[r][1], 3)}
+                        for r in ("form", "family", "genus", "species")}
+            hier_out["level"] = lv
+            hier_out["top_species"] = [{"name": a, "score": round(b, 4)}
+                                       for a, b in hier["top_species"]]
+            form, fconf = hier["form"]
+            if lv in ("family", "genus", "species"):
+                sci, sp_conf = hier[lv][0], hier[lv][1]
+            else:
+                sci, sp_conf = "", fconf
+            above = {"family": [], "genus": ["family"],
+                     "species": ["family", "genus"]}.get(lv, [])
+            tau_form = (classifier.tau["form"] if isinstance(classifier.tau, dict)
+                        else classifier.tau)
+            com = " · ".join(([form] if fconf >= tau_form else [])
+                             + [hier[r][0] for r in above])
+            sp_raw = sp_conf
+            agreement = (sum(v["level"] != "plant" and v.get(lv, [None])[0] == hier[lv][0]
+                             for v in hier["per_view"]) / len(hier["per_view"])
+                         if lv in ("family", "genus", "species") else 1.0)
+            # the hierarchy starts at "plant": the detector's coarse plant/tree
+            # class is not a growth form, so it is not shown when the form is unsure
+            if fconf >= tau_form:
+                cat, cat_conf = form, fconf
+            else:
+                cat, cat_conf = "plant", fconf
+            fused = [(a, "", b) for a, b in hier["top_species"]]
+            method = "hierarchical"
         out.append({
             "id": k,
             "category": cat,
@@ -1040,7 +1134,9 @@ def main():
             "species_entropy": ent_bits,
             "species_entropy_max": ent_max,
             "species_unsupported": unsupported,
-            "species_identified": bool(sp_raw >= args.min_species_score
+            "hierarchy": hier_out,
+            "species_identified": bool(hier_out["level"] in ("family", "genus", "species"))
+            if hier_out else bool(sp_raw >= args.min_species_score
                                        and agreement >= args.min_species_agreement
                                        and len(members) >= args.min_species_views),
             "centroid": [float(v) for v in inst["centroid"]],

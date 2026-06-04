@@ -1166,7 +1166,32 @@ function flyToPlant(i) {
   setLook(c, Math.max(0.25, lo.distanceTo(hi) * 2.2));
 }
 
+function hierLadder(h) {
+  // form -> family -> genus -> species; ranks past the stopping level are dimmed
+  const order = ["form", "family", "genus", "species"];
+  const depth = { plant: -1, form: 0, family: 1, genus: 2, species: 3 }[h.level];
+  return `<div class="dist"><div class="distlab">hierarchy &mdash; named down to
+    <b>${h.level}</b></div>` + order.map((r, k) => {
+      const x = h[r] || {};
+      const on = k <= depth || (r === "form" && depth >= 0);
+      return `<div class="bar" title="${r}">
+        <span class="bn">${r}: ${on ? `<b>${x.name || "-"}</b>` :
+          `<span class="dim">${x.name || "-"}</span>`}</span>
+        <span class="bt"><i class="${on ? "ok" : "no"}"
+          style="width:${Math.max(1, (x.conf || 0) * 100).toFixed(1)}%"></i></span>
+        <span class="bv">${(x.conf || 0).toFixed(2)}</span></div>`;
+    }).join("") + `</div>`;
+}
+
 function speciesLine(p) {
+  if (p.hierarchy) {
+    const h = p.hierarchy;
+    if (h.level === "plant") return `<span class="dim">plant (no rank confident)</span>`;
+    if (h.level === "form") return `${p.category}`;
+    const name = h.level === "family" ? p.species : `<i>${p.species}</i>`;
+    return `${name} <span class="dim">(${h.level})</span>${
+      p.species_common ? ` — ${p.species_common}` : ""}`;
+  }
   if (!p.species) return `<span class="dim">no species candidate</span>`;
   if (!p.species_identified) {
     return `<span class="dim">unidentified — best guess <i>${p.species}</i>
@@ -1213,6 +1238,7 @@ function renderPlantDetail(i) {
     <h4>#${p.id} ${p.category}</h4>
     ${p.crop ? `<img class="crop" src="/api/crop/${p.crop}">` : ""}
     <div>${speciesLine(p)}</div>
+    ${p.hierarchy ? hierLadder(p.hierarchy) : ""}
     <div class="kv" style="margin-top:8px">
       <div class="k">detection</div><div class="v">${p.detection_score.toFixed(2)}</div>
       <div class="k">category vote</div><div class="v">${p.category_confidence.toFixed(2)}</div>
