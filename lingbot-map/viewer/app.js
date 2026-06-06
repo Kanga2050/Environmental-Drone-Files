@@ -110,7 +110,7 @@ function adoptPose(basis) {
 }
 
 const cloudUniforms = {
-  uSize: { value: 0.004 },
+  uSize: { value: 0.001 },
   uPx: { value: 500.0 },
   uTint: { value: 1.0 },
   uBright: { value: 1.0 },

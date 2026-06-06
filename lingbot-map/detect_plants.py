@@ -710,6 +710,8 @@ def main():
     ap.add_argument("--conf_threshold", type=float, default=None,
                     help="Depth-confidence gate for 3D points (default: from meta.json)")
     ap.add_argument("--min_points", type=int, default=40)
+    ap.add_argument("--cluster_frac", type=float, default=0.04,
+                    help="Cluster distance as a fraction of the scene extent (when --cluster_dist is 0)")
     ap.add_argument("--cluster_dist", type=float, default=0.0,
                     help="3D merge distance (0 = auto, 4%% of scene extent)")
     ap.add_argument("--vegetation_mask", action=argparse.BooleanOptionalAction, default=True,
@@ -947,7 +949,7 @@ def main():
     cloud = np.load(os.path.join(art, "cloud.npz"))["points"]
     lo, hi = np.percentile(cloud, [2, 98], axis=0)
     extent = float(np.linalg.norm(hi - lo))
-    cluster_dist = args.cluster_dist or 0.04 * extent
+    cluster_dist = args.cluster_dist or args.cluster_frac * extent
     print(f"\nScene extent {extent:.3f}; clustering at {cluster_dist:.4f}")
 
     instances = cluster_detections(dets, cluster_dist)
