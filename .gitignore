@@ -1,2 +1,15 @@
 /.venv310
-video/
+__pycache__/
+*.py[cod]
+*.log
+
+# Large binary inputs and outputs live next to the code but not in git:
+# the source videos, the model weights, reconstructed maps and the exported
+# viewers (a viewer embeds its whole cloud, ~100 MB).
+/video/
+/models/
+/maps/
+/viewers/
+
+# fine-tuning runs (adapters, merged checkpoints, logs)
+training/runs/
