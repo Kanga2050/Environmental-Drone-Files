@@ -621,8 +621,14 @@ class StreamMapper:
                  undistort_fov=120.0, crop_margins=(0.0, 0.0, 0.0, 0.0), clahe=False,
                  min_frame_luma=0.0, min_frame_std=0.0, sky_model=None, sky_threshold=0.5,
                  compact_every=30, pin_k=None, save_artifacts=None, artifact_every=30,
-                 source=None, fps=30.0):
+                 source=None, fps=30.0, gpu_fraction=0.8):
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        if self.device.type == "cuda":
+            # The KV cache is rebuilt by concatenation every frame, which leaves
+            # PyTorch's cache of freed blocks growing until, on Windows, the
+            # driver starts paging GPU memory to system RAM and a frame takes
+            # 10x longer.  A cap makes the allocator reuse its cache instead.
+            torch.cuda.set_per_process_memory_fraction(gpu_fraction)
         self.cfg = dict(image_size=image_size, patch_size=patch_size,
                         num_scale_frames=num_scale_frames, anchor_stride=max(1, anchor_stride),
                         keyframe_interval=max(1, keyframe_interval), max_frame_num=max_frame_num,
@@ -916,7 +922,9 @@ def main():
         if args.stats_every and fi % args.stats_every == 0:
             el = time.time() - m.t0
             vram = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
-            print(f"[{fi:6d}] {fi / max(el, 1e-6):5.2f} fps avg | VRAM {vram:5.2f} GB | "
+            resv = torch.cuda.memory_reserved() / 1e9 if torch.cuda.is_available() else 0.0
+            print(f"[{fi:6d}] {fi / max(el, 1e-6):5.2f} fps avg | VRAM {vram:5.2f} GB "
+                  f"(reserved {resv:5.2f}) | "
                   f"map {len(m.point_map):>9,} pts", flush=True)
     m.flush()
     el = time.time() - m.t0
