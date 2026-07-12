@@ -1,20 +1,19 @@
 #!/usr/bin/env bash
 # Video -> labelled, coloured 3D plant map -> one offline viewer HTML.
 #
-#   bash make_viewer.sh VIDEO NAME [GCT_WEIGHTS]
+#   bash make_viewer.sh VIDEO NAME
 #   bash make_viewer.sh --from-map NAME     (steps 2-4 on an existing maps/NAME,
 #                                            e.g. one recorded by yardmap/live.py)
 #
 # Writes maps/NAME/ (cloud, per-frame depth and poses, plants) and
-# viewers/NAME.html.  GCT_WEIGHTS defaults to models/gct.pt; pass
-# models/gct_foliage.pt for the foliage-tuned reconstruction model.
+# viewers/NAME.html.
 # Short clips (under a minute) need a smaller anchor: ANCHOR_STRIDE=6.
 set -euo pipefail
 cd "$(dirname "$0")"
 
 VIDEO="$1"
 NAME="$2"
-GCT="${3:-models/gct.pt}"
+GCT=models/gct.pt
 ANCHOR_STRIDE="${ANCHOR_STRIDE:-72}"
 PY=.venv310/Scripts/python.exe
 M=models
