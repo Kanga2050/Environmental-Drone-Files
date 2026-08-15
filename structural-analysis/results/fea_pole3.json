@@ -1,0 +1,78 @@
+{
+ "case": "pole3",
+ "vm_max": 68.76219105173826,
+ "vm_loc": [
+  -8.382452978175351,
+  9.7386835778314,
+  -0.295337357464675
+ ],
+ "vm_region": "rear arm",
+ "planar_z": {
+  "fos": 0.42562277786510827,
+  "mode": "in-layer",
+  "loc": [
+   -8.4,
+   9.7,
+   -0.3
+  ],
+  "region": "rear arm"
+ },
+ "planar_y": {
+  "fos": 0.42713364386065267,
+  "mode": "interlayer",
+  "loc": [
+   -9.3,
+   -8.9,
+   -0.3
+  ],
+  "region": "rear arm"
+ },
+ "planar_belly": {
+  "fos": 0.4381674244672299,
+  "mode": "in-layer",
+  "loc": [
+   -8.4,
+   9.7,
+   -0.3
+  ],
+  "region": "rear arm"
+ },
+ "conformal": {
+  "fos": 0.42470198520898966,
+  "mode": "in-layer",
+  "loc": [
+   -8.4,
+   9.7,
+   -0.3
+  ],
+  "region": "rear arm"
+ },
+ "iso_fos": 0.43628627216703014,
+ "regions": {
+  "rear arm": {
+   "vm": 68.76219105173826,
+   "fos_planar_z": 0.42562277786510827,
+   "fos_conformal": 0.42470198520898966
+  },
+  "rear arm root": {
+   "vm": 9.901307526904025,
+   "fos_planar_z": 1.6849691828145938,
+   "fos_conformal": 2.539413062605443
+  },
+  "front arm": {
+   "vm": 0.22327878314889177,
+   "fos_planar_z": 136.57463510360654,
+   "fos_conformal": 138.961860116854
+  },
+  "front arm root": {
+   "vm": 0.6212736759324577,
+   "fos_planar_z": 25.380638437209587,
+   "fos_conformal": 45.71080464219743
+  },
+  "body shell": {
+   "vm": 8.84574803934273,
+   "fos_planar_z": 2.5929139787156483,
+   "fos_conformal": 3.430315307390255
+  }
+ }
+}
