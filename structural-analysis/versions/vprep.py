@@ -40,8 +40,10 @@ def mesh_one(tags, fragment=False):
         if os.path.exists(out): os.remove(out)
         r = subprocess.run([sys.executable, os.path.abspath(__file__), "--one", step, json.dumps(tags), str(int(fragment)), mode, out], capture_output=True, text=True)
         if os.path.exists(out):
-            z = np.load(out); os.remove(out); print("meshed", tags, "mode", mode, flush=True)
-            return z["X"], z["E"]
+            with np.load(out) as z:
+                X, E = z["X"].copy(), z["E"].copy()
+            os.remove(out); print("meshed", tags, "mode", mode, flush=True)
+            return X, E
         print("mesh attempt", mode, "failed:", (r.stdout + r.stderr).strip().splitlines()[-1][:100] if (r.stdout + r.stderr).strip() else "", flush=True)
     raise RuntimeError("all mesh attempts failed")
 if not os.path.exists("manta_3.0.inp"):

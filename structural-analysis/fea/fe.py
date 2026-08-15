@@ -72,6 +72,9 @@ def geom(ch):
     x = X[EC[ch]]
     J = np.einsum("ia,eib->eab", DN[0], x)
     det = np.linalg.det(J)
+    bad = np.abs(det) < 1e-6
+    if bad.any():
+        J = J.copy(); J[bad] = np.eye(3); det = np.where(bad, 0.0, det)
     Ji = np.linalg.inv(J)
     return x, J, det / 6.0, Ji
 
@@ -109,6 +112,11 @@ def assemble(mass=False):
         if mass:
             Me = np.kron(MREF, np.eye(3))[None] * (RHO * vol)[:, None, None]
             M = M + sp.csr_matrix((Me.ravel(), (r, c)), shape=K.shape)
+    d0 = K.diagonal()
+    K = K + sp.diags(np.where(d0 > 0, 1e-9 * d0.mean(), d0.mean() * 1e-6))
+    if mass:
+        m0 = M.diagonal()
+        M = M + sp.diags(np.where(m0 > 0, 0.0, m0[m0 > 0].mean() * 1e-6))
     return K, M, V
 
 
@@ -274,7 +282,9 @@ def static(name):
     K = (K + Kt).tocsr()
     F = loads(p, V)
     free = np.setdiff1d(np.arange(3 * NN), p["bc"])
-    A = sp.triu(K[free][:, free]).tocsr()
+    Kf = K[free][:, free]
+    Kf = Kf + sp.diags(np.full(Kf.shape[0], 1e-9 * Kf.diagonal().mean()))
+    A = sp.triu(Kf).tocsr()
     A.sort_indices()
     sol = _ps()
     U = np.zeros(3 * NN)
