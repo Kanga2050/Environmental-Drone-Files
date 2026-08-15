@@ -1,7 +1,9 @@
 
 
 import argparse
+import json
 import os
+import socket
 import signal
 import sys
 import time
@@ -77,7 +79,7 @@ def iter_video_frames(video_path, fps, stride, max_frames, loop, image_size, pat
     emitted = 0
     pass_idx = 0
     while True:
-        cap = cv2.VideoCapture(video_path)
+        cap = cv2.VideoCapture(int(video_path) if str(video_path).isdigit() else video_path)
         if not cap.isOpened():
             raise RuntimeError(f"Could not open video: {video_path}")
         src_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -636,6 +638,8 @@ def build_parser():
                              "is only weakly confident on dull overcast sky, so lowering "
                              "this catches hazy horizons at the cost of bright walls")
     parser.add_argument("--compact_every", type=int, default=30)
+    parser.add_argument("--tap", type=str, default=None,
+                        help="HOST:PORT to send per-frame map quality to fly/ctl.py")
 
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--point_size", type=float, default=0.004)
@@ -901,8 +905,14 @@ def main():
             model._set_skip_append(False)
         del fb
 
+    tap = None
+    if args.tap:
+        host, port = args.tap.rsplit(":", 1)
+        tap = (socket.socket(socket.AF_INET, socket.SOCK_DGRAM), (host, int(port)))
+
     print("Streaming... (Ctrl-C to stop and keep the viewer up)")
     for tensor, rgb in source:
+        t_frame = time.time()
         if inject:
             here = src_ids[frame_idx] if frame_idx < len(src_ids) else -1
             for a in inject.pop(here, []):
@@ -937,6 +947,13 @@ def main():
             out, frame_b, args.conf_threshold, args.downsample_factor,
             args.conf_percentile, sky, pin_k)
         del out, frame_b
+
+        if tap:
+            n = raw["conf"][0][::args.downsample_factor, ::args.downsample_factor].size
+            kc = raw["kept_conf"]
+            tap[0].sendto(json.dumps({"t": t_frame, "f": frame_idx, "q": len(pts) / max(n, 1),
+                                      "c": float(kc.mean()) if len(kc) else 0.0}).encode(),
+                          tap[1])
 
         if want_artifacts and (frame_idx % args.artifact_every == 0):
             save_frame_artifacts(art_frames_dir, [frame_idx], raw, [rgb])
