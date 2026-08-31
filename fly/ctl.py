@@ -6,6 +6,9 @@ import queue
 import socket
 import threading
 import time
+import numpy as np
+import geo
+import plan
 from link import M, conn, beat, ne, off, upload, cmd, mode, goto
 
 
@@ -29,6 +32,11 @@ class Ctl:
         self.done = False
         self.adj = time.time()
         self.todo, self.tgt, self.arr, self.sent, self.t0 = [], None, None, 0, 0
+        self.pairs, self.rc, self.pending, self.busy = [], 0, None, False
+        self.sc = None
+        if g.model:
+            from scan import Scanner
+            self.sc = Scanner(g.model)
 
     def mav(self, r):
         k = r.get_type()
@@ -41,6 +49,12 @@ class Ctl:
             self.cur = r.seq
         elif k == "SYS_STATUS" and r.battery_remaining >= 0:
             self.bat = r.battery_remaining
+        elif k == "RC_CHANNELS":
+            v = r.chan8_raw
+            if self.g.approve == "rc" and v > 1700 >= self.rc and self.pending:
+                print("ch8 approve")
+                self.fly()
+            self.rc = v
         elif k == "STATUSTEXT":
             print("fc:", r.text)
 
@@ -63,6 +77,11 @@ class Ctl:
         p = self.at(d["t"] - self.g.lag)
         if p is None or p[2] < 3:
             return
+        if "p" in d:
+            n, e = ne(*self.o, p[0], p[1])
+            self.pairs.append((d["p"], (e, n, p[2])))
+            if len(self.pairs) > 20000:
+                del self.pairs[:5000]
         s = self.cells.setdefault(self.key(p[0], p[1]), [0.0, 0])
         s[0] += d["q"]
         s[1] += 1
@@ -108,6 +127,70 @@ class Ctl:
         mode(self.m, "GUIDED")
         return True
 
+    def scan(self):
+        if self.busy or not self.sc:
+            return False
+        self.busy = True
+        threading.Thread(target=self.work, daemon=True).start()
+        return True
+
+    def work(self):
+        try:
+            g = self.g
+            if len(self.pairs) < 30:
+                raise RuntimeError(f"only {len(self.pairs)} pose pairs")
+            a, b = np.array([x[0] for x in self.pairs]), np.array([x[1] for x in self.pairs])
+            if np.ptp(b[:, :2], 0).max() < 5:
+                raise RuntimeError("flight too small to align")
+            T, err = geo.robust(a, b)
+            d = np.load(g.snap)
+            p = geo.apply(T, d["points"].astype(np.float64))
+            c = d["colors"].astype(np.float32) / 255.0
+            n0, n1, e0, e1 = self.box
+            pad = g.pad
+            m = (p[:, 0] > e0 - pad) & (p[:, 0] < e1 + pad) & (p[:, 1] > n0 - pad) & (p[:, 1] < n1 + pad)
+            print(f"scan: {m.sum():,} pts, scale {T[0]:.2f}, fit {err:.2f} m")
+            t = time.time()
+            from scan import cells, save
+            ps, pq, nj = self.sc(p[m], c[m])
+            cl = cells(p[m], ps, pq, g.scell, (e0 - pad, n0 - pad), (e1 + pad, n1 + pad))
+            save("scan_cells.npz", cl)
+            q = self.pos[-1]
+            n, e = ne(*self.o, q[0], q[1])
+            cfg = plan.Cfg(amin=g.samin, amax=g.amax, budget=g.budget, speed=g.sspeed, thr=g.thr, clear=g.clear)
+            ins, it, pri, order, transit, dur = plan.build(cl, self.o, (e, n), cfg)
+            print(f"scan took {time.time() - t:.1f} s ({nj} patches)")
+            plan.show(ins, transit, dur)
+            json.dump({"origin": self.o, "instructions": ins, "items": it}, open("survey.json", "w"), indent=1)
+            if not ins:
+                print("nothing worth resurveying")
+                self.redo()
+                return
+            self.pending = it
+            if g.approve == "auto":
+                self.fly()
+            else:
+                print("flip CH8 or type 'fly' to send" if g.approve == "rc" else "type 'fly' to send")
+        except Exception as ex:
+            print(f"scan failed: {ex}")
+            if self.state == "watch" and self.cur == self.loit:
+                self.redo()
+        finally:
+            self.busy = False
+
+    def fly(self):
+        if not self.pending:
+            print("no survey pending")
+            return
+        it, self.pending = self.pending, None
+        if not upload(self.m, it):
+            print("survey upload failed")
+            return
+        self.it, self.loit, self.state = [list(x) for x in it], -1, "watch"
+        cmd(self.m, M.MAV_CMD_DO_SET_MISSION_CURRENT, 1)
+        mode(self.m, "AUTO")
+        print(f"survey sent: {len(it)} items")
+
     def step(self):
         now = time.time()
         fm = self.m.flightmode
@@ -126,7 +209,8 @@ class Ctl:
                     self.retarget(na)
             if self.cur == self.loit and not self.done:
                 self.done = True
-                self.redo()
+                if not self.scan():
+                    self.redo()
         elif self.state == "redo":
             if fm != "GUIDED" and now - self.t0 > 3:
                 print(f"pilot took over ({fm})")
@@ -169,10 +253,14 @@ class Ctl:
         elif w[0] in ("rtl", "land", "loiter"):
             self.state = "watch"
             mode(self.m, w[0].upper())
+        elif w[0] == "scan":
+            print("scanning" if self.scan() else "scan unavailable")
+        elif w[0] == "fly":
+            self.fly()
         elif w[0] == "cells":
             print(f"{len(self.bad())} cells to redo, {len(self.cells)} seen")
         else:
-            print("alt N | go LAT LON [ALT] | auto | redo | rtl | land | loiter | cells")
+            print("alt N | go LAT LON [ALT] | auto | redo | scan | fly | rtl | land | loiter | cells")
 
 
 def main():
@@ -193,6 +281,16 @@ def main():
     p.add_argument("--dwell", type=float, default=4)
     p.add_argument("--maxre", type=int, default=12)
     p.add_argument("--bat", type=int, default=35)
+    p.add_argument("--model", default=None)
+    p.add_argument("--snap", default="live.npz")
+    p.add_argument("--approve", choices=["rc", "key", "auto"], default="rc")
+    p.add_argument("--scell", type=float, default=2.0)
+    p.add_argument("--pad", type=float, default=4.0)
+    p.add_argument("--samin", type=float, default=6.0)
+    p.add_argument("--sspeed", type=float, default=4.0)
+    p.add_argument("--thr", type=float, default=0.45)
+    p.add_argument("--clear", type=float, default=4.0)
+    p.add_argument("--budget", type=float, default=240.0)
     p.add_argument("--up", action="store_true")
     g = p.parse_args()
     pl = json.load(open(g.plan))
@@ -216,7 +314,7 @@ def main():
                 c.mav(r)
             while True:
                 try:
-                    c.tap(json.loads(sk.recv(512)))
+                    c.tap(json.loads(sk.recv(2048)))
                 except (BlockingIOError, ValueError):
                     break
             while not q.empty():

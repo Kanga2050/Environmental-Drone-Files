@@ -11,7 +11,7 @@ def conn(url, wait=60):
     m = mavutil.mavlink_connection(url, source_system=255, source_component=M.MAV_COMP_ID_MISSIONPLANNER)
     if not m.wait_heartbeat(timeout=wait):
         raise SystemExit(f"no heartbeat on {url}")
-    for i, hz in ((33, 4), (42, 1), (1, 1)):
+    for i, hz in ((33, 4), (42, 1), (1, 1), (65, 2)):
         cmd(m, M.MAV_CMD_SET_MESSAGE_INTERVAL, i, 1e6 / hz)
     return m
 
