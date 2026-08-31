@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 import sim
 from scipy.spatial import cKDTree
-from pt import Net, feats, geof, NS, NQ
+from pt import Net, feats, geof, ref, NS, NQ
 
 
 def patches(seed, n, npt):
@@ -19,6 +19,7 @@ def patches(seed, n, npt):
     _, f = np.unique(k, axis=0, return_index=True)
     p, c, s, q = p[f], c[f], s[f], q[f]
     tree = cKDTree(p)
+    rf = ref(geof(p, tree, p[rng.choice(len(p), min(len(p), 6000), replace=False)]))
     out = []
     tries = 0
     while len(out) < n and tries < 4 * n:
@@ -40,7 +41,7 @@ def patches(seed, n, npt):
         pp = (pp - c0) @ (Rz @ Rx @ Ry).T * rng.uniform(0.9, 1.1, 3) + c0
         if rng.random() < 0.5:
             pp[:, 0] = 2 * ctr[0] - pp[:, 0]
-        out.append((feats(pp, c[m], ctr, R, gg), s[m].astype(np.int64), q[m].astype(np.int64)))
+        out.append((feats(pp, c[m], ctr, R, gg, rf), s[m].astype(np.int64), q[m].astype(np.int64)))
     return out
 
 

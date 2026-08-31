@@ -6,7 +6,7 @@ import time
 import numpy as np
 import torch
 from scipy.spatial import cKDTree
-from pt import load, feats, geof, NS, NQ
+from pt import load, feats, geof, ref, NS, NQ, NG
 from sim import SEM, QUAL
 
 
@@ -57,15 +57,22 @@ def level(p, up):
 
 def voxel(p, v):
     k = np.floor(p / v).astype(np.int64)
-    _, first, inv = np.unique(k, axis=0, return_index=True, return_inverse=True)
+    k -= k.min(0)
+    h = (k[:, 0] * (k[:, 1].max() + 1) + k[:, 1]) * (k[:, 2].max() + 1) + k[:, 2]
+    _, first, inv = np.unique(h, return_index=True, return_inverse=True)
     return first, inv.ravel()
 
 
+def health(r):
+    return float(np.clip((0.72 - r[6]) / (0.72 - 0.19), 0, 1))
+
+
 class Scanner:
-    def __init__(self, path, dev=None, R=5.0, npt=1024, bs=32, vox=0.08):
+    def __init__(self, path, dev=None, R=5.0, npt=1024, bs=32, vox=0.08, chunks=4):
         self.dev = dev or ("cuda" if torch.cuda.is_available() else "cpu")
         self.m = load(path, self.dev)
-        self.R, self.npt, self.bs, self.vox = R, npt, bs, vox
+        self.R, self.npt, self.bs, self.vox, self.chunks = R, npt, bs, vox, chunks
+        self.health = None
 
     @torch.inference_mode()
     def __call__(self, p, c, seed=0):
@@ -73,35 +80,44 @@ class Scanner:
         first, inv = voxel(p, self.vox)
         q, cc = p[first], c[first]
         t3 = cKDTree(q)
-        g = np.concatenate([geof(q, t3, q[i:i + 50000]) for i in range(0, len(q), 50000)])
+        r = ref(geof(q, t3, q[rng.choice(len(q), min(len(q), 6000), replace=False)]))
+        self.health = health(r)
         tree = cKDTree(q[:, :2])
         lo, hi = q[:, :2].min(0), q[:, :2].max(0)
-        st = self.R * 1.3
+        st = self.R * 1.2
         gx, gy = np.meshgrid(np.arange(lo[0], hi[0] + st, st), np.arange(lo[1], hi[1] + st, st))
-        seeds = np.c_[gx.ravel(), gy.ravel()]
-        ps, pq, cnt = np.zeros((len(q), NS)), np.zeros((len(q), NQ)), np.zeros(len(q))
         jobs = []
-        for ctr in seeds:
+        for ctr in np.c_[gx.ravel(), gy.ravel()]:
             m = np.array(tree.query_ball_point(ctr, self.R), dtype=np.int64)
             if len(m) < 64:
                 continue
             m = rng.permutation(m)
-            for k in range(0, len(m), self.npt):
+            for k in range(0, min(len(m), self.npt * self.chunks), self.npt):
                 ch = m[k:k + self.npt]
                 if len(ch) < self.npt:
                     ch = np.r_[ch, rng.choice(m, self.npt - len(ch))]
                 jobs.append((ctr, ch))
+        used = np.unique(np.concatenate([ch for _, ch in jobs]))
+        g = np.zeros((len(q), NG), np.float32)
+        g[used] = geof(q, t3, q[used])
+        ps, pq, cnt = np.zeros((len(q), NS)), np.zeros((len(q), NQ)), np.zeros(len(q))
         for b in range(0, len(jobs), self.bs):
             J = jobs[b:b + self.bs]
-            x = torch.from_numpy(np.stack([feats(q[ch], cc[ch], ctr, self.R, g[ch]) for ctr, ch in J])).to(self.dev)
+            x = torch.from_numpy(np.stack([feats(q[ch], cc[ch], ctr, self.R, g[ch], r) for ctr, ch in J])).to(self.dev)
             ls, lq = self.m(x)
             ls, lq = ls.softmax(-1).cpu().numpy(), lq.softmax(-1).cpu().numpy()
             for i, (_, ch) in enumerate(J):
                 np.add.at(ps, ch, ls[i])
                 np.add.at(pq, ch, lq[i])
                 np.add.at(cnt, ch, 1)
-        cnt = np.maximum(cnt, 1)[:, None]
-        return (ps / cnt)[inv], (pq / cnt)[inv], len(jobs)
+        seen = cnt > 0
+        ps[seen] /= cnt[seen, None]
+        pq[seen] /= cnt[seen, None]
+        if (~seen).any():
+            _, j = cKDTree(q[seen]).query(q[~seen], k=1)
+            src = np.flatnonzero(seen)[j]
+            ps[~seen], pq[~seen] = ps[src], pq[src]
+        return ps[inv], pq[inv], len(jobs)
 
 
 def cells(p, ps, pq, size, lo=None, hi=None):
@@ -171,7 +187,7 @@ def main():
         cl = cells(q[m], ps, pq, g.cell)
         sem = np.bincount(ps.argmax(1), minlength=NS) / m.sum()
         qu = np.bincount(pq.argmax(1), minlength=NQ) / m.sum()
-        r = {"frac": round(float(f), 2), "points": int(m.sum()), "patches": nj, "sec": round(dt, 1),
+        r = {"frac": round(float(f), 2), "points": int(m.sum()), "patches": nj, "sec": round(dt, 1), "health": round(sc.health, 2),
              "sem": dict(zip(SEM, np.round(sem, 3).tolist())), "qual": dict(zip(QUAL, np.round(qu, 3).tolist()))}
         print(json.dumps(r))
         res.append(r)

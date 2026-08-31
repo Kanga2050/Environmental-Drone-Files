@@ -27,11 +27,19 @@ def geof(full, tree, x):
     return np.c_[r1, l1, p1, s1, n1, o1, s2, o2].astype(np.float32)
 
 
-def feats(p, c, ctr, R, g):
+REL = [1, 2, 3, 5, 6, 7]
+
+
+def ref(g):
+    return np.median(g, 0)
+
+
+def feats(p, c, ctr, R, g, r):
     z0 = np.percentile(p[:, 2], 2)
     x = (p - np.r_[ctr, z0]) / R
     g = g.copy()
     g[:, 0] = np.log(g[:, 0] / max(np.median(g[:, 0]), 1e-9))
+    g[:, REL] = np.log((g[:, REL] + 0.02) / (r[REL] + 0.02))
     return np.c_[x, c, g].astype(np.float32)
 
 

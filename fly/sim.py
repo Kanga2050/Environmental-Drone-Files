@@ -236,7 +236,7 @@ class Scene:
 
 def corrupt(rng, p, c, s, L):
     q = np.zeros(len(p), np.uint8)
-    p = p + rng.normal(0, rng.uniform(0.005, 0.03), p.shape)
+    p = p + rng.normal(0, np.exp(rng.uniform(np.log(0.005), np.log(0.08))), p.shape)
     extra = []
     for kind in rng.permutation([1, 2, 3, 1, 2, 3, 1, 3])[: rng.integers(2, 8)]:
         ctr = rng.uniform(-L, L, 2)
