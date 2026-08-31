@@ -153,7 +153,7 @@ class Ctl:
             t = time.time()
             from scan import cells, save
             ps, pq, nj = self.sc(p[m], c[m])
-            cl = cells(p[m], ps, pq, g.scell, (e0 - pad, n0 - pad), (e1 + pad, n1 + pad))
+            cl = cells(p[m], ps, pq, g.scell, (e0, n0), (e1, n1))
             save("scan_cells.npz", cl)
             q = self.pos[-1]
             n, e = ne(*self.o, q[0], q[1])

@@ -5,22 +5,34 @@ from scipy import ndimage
 from link import M, off
 
 
+def rank(v, m):
+    out = np.zeros_like(v, dtype=float)
+    if m.sum() > 1:
+        o = np.argsort(np.argsort(v[m]))
+        out[m] = o / (m.sum() - 1)
+    return out
+
+
 def priority(cl, w, minn):
     n = cl["n"]
-    p = w["bad"] * cl["bad"] + w["plant"] * (cl["plant"] + 0.5 * cl["lowveg"]) + w["double"] * cl["double"]
-    p = np.where(n < minn, w["unseen"], p)
+    m = n >= minn
+    bad = rank(cl["bad"], m) ** 2
+    p = w["bad"] * bad + w["plant"] * (cl["plant"] + 0.5 * cl["lowveg"]) + w["thin"] * cl["thin"]
+    p = np.where(m, np.clip(p / (w["bad"] + w["plant"]), 0, 1), w["unseen"])
     return p
 
 
-def regions(cl, pri, thr, minc=2):
+def regions(cl, pri, thr, minc=3, tile=6):
     m = ndimage.binary_closing(pri > thr, iterations=1) & np.isfinite(pri)
     lab, k = ndimage.label(m)
     out = []
     for r in range(1, k + 1):
         ij = np.argwhere(lab == r)
-        if len(ij) < minc:
-            continue
-        out.append(ij)
+        t = ij // tile
+        for key in np.unique(t, axis=0):
+            s = ij[(t == key).all(1)]
+            if len(s) >= minc:
+                out.append(s)
     return out
 
 
@@ -28,9 +40,9 @@ def why(cl, ij):
     f = lambda k: float(np.nanmean(cl[k][ij[:, 0], ij[:, 1]]))
     n = cl["n"][ij[:, 0], ij[:, 1]]
     parts = []
-    for k, lab in (("double", "doubled"), ("noisy", "noisy"), ("sparse", "sparse"), ("plant", "plants"), ("lowveg", "low veg"), ("struct", "structure")):
+    for k, lab in (("bad", "poor reconstruction"), ("thin", "thin coverage"), ("plant", "plants"), ("lowveg", "low veg"), ("struct", "structure")):
         v = f(k)
-        if v > 0.15:
+        if v > (0.5 if k == "bad" else 0.25):
             parts.append(f"{lab} {v:.0%}")
     u = float((n < 5).mean())
     if u > 0.2:
@@ -54,7 +66,7 @@ def mow(pts, gap, pad):
 
 
 def build(cl, o, start, g):
-    w = {"bad": g.wbad, "plant": g.wplant, "double": g.wdouble, "unseen": g.wunseen}
+    w = {"bad": g.wbad, "plant": g.wplant, "thin": g.wthin, "unseen": g.wunseen}
     pri = priority(cl, w, g.minn)
     lo, cs = np.asarray(cl["lo"]), cl["size"]
     regs = []
@@ -65,7 +77,7 @@ def build(cl, o, start, g):
         hag = max(alt - max(top, 0.0), 2.0)
         gap = 2 * hag * math.tan(math.radians(g.fov / 2)) * (1 - g.side)
         wp, yaw = mow(xy, max(gap, 1.0), cs / 2)
-        score = float(pri[ij[:, 0], ij[:, 1]].sum() * cs * cs)
+        score = float(np.maximum(pri[ij[:, 0], ij[:, 1]] - g.thr, 0).sum() * cs * cs)
         L = float(np.linalg.norm(np.diff(wp, axis=0), axis=1).sum())
         regs.append({"xy": xy, "wp": wp, "alt": round(alt, 1), "gap": round(gap, 1), "yaw": round(yaw), "score": score,
                      "area": round(len(ij) * cs * cs), "why": why(cl, ij), "len": L, "top": round(float(top), 1)})
@@ -106,7 +118,7 @@ def build(cl, o, start, g):
 
 class Cfg:
     def __init__(self, **k):
-        d = dict(wbad=1.0, wplant=0.6, wdouble=0.8, wunseen=0.5, minn=20, thr=0.45, amin=6.0, amax=40.0, clear=4.0,
+        d = dict(wbad=1.0, wplant=0.5, wthin=0.6, wunseen=0.5, minn=20, thr=0.45, amin=6.0, amax=40.0, clear=4.0,
                  fov=90.0, side=0.7, speed=4.0, budget=240.0)
         d.update(k)
         self.__dict__.update(d)

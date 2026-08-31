@@ -135,6 +135,9 @@ def cells(p, ps, pq, size, lo=None, hi=None):
     for i, s in enumerate(QUAL):
         out[s] = (np.bincount(k, pq[:, i], len(n)) / np.maximum(n, 1)).reshape(sh)
     out["bad"] = 1 - out["good"]
+    seen = n > 0
+    med = np.median(n[seen]) if seen.any() else 1
+    out["thin"] = np.clip(1 - n / max(med, 1), 0, 1).reshape(sh)
     o = np.lexsort((z, k))
     ks, zs = k[o], z[o]
     st = np.searchsorted(ks, np.arange(len(n)))
