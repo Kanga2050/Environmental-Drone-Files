@@ -106,9 +106,9 @@ class Ctl:
         return (math.floor(n / c), math.floor(e / c))
 
     def tap(self, d):
+        self.nt += 1
         if self.m.flightmode not in ("AUTO", "GUIDED"):
             return
-        self.nt += 1
         p = self.at(d["t"] - self.g.lag)
         if p is None or p[2] < 3:
             return
@@ -373,10 +373,12 @@ class Ctl:
             print("scanning" if self.scan() else "scan unavailable")
         elif w[0] == "fly":
             self.fly()
+        elif w[0] == "frames":
+            print(f"frames: {self.nt} received, {self.nm} matched to GPS, {self.nb} in box")
         elif w[0] == "cells":
             print(f"{len(self.bad())} cells to redo, {len(self.cells)} seen")
         else:
-            print("alt N | go LAT LON [ALT] | auto | redo | scan | fly | rtl | land | loiter | cells")
+            print("alt N | go LAT LON [ALT] | auto | redo | scan | fly | rtl | land | loiter | cells | frames")
 
 
 def main():
