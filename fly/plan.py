@@ -40,7 +40,7 @@ def why(cl, ij):
     f = lambda k: float(np.nanmean(cl[k][ij[:, 0], ij[:, 1]]))
     n = cl["n"][ij[:, 0], ij[:, 1]]
     parts = []
-    for k, lab in (("bad", "poor reconstruction"), ("thin", "thin coverage"), ("plant", "plants"), ("lowveg", "low veg"), ("struct", "structure")):
+    for k, lab in (("bad", "poor images"), ("thin", "thin coverage"), ("plant", "plants"), ("lowveg", "low veg"), ("struct", "structure")):
         v = f(k)
         if v > (0.5 if k == "bad" else 0.25):
             parts.append(f"{lab} {v:.0%}")

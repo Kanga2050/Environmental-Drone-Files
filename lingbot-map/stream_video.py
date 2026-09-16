@@ -643,6 +643,7 @@ def build_parser():
     parser.add_argument("--snap", type=str, default=None,
                         help="Write the live map to this .npz for fly/ctl.py scans")
     parser.add_argument("--snap_every", type=int, default=60)
+    parser.add_argument("--snap_win", type=int, default=120)
     parser.add_argument("--snap_points", type=int, default=600000)
 
     parser.add_argument("--port", type=int, default=8080)
@@ -909,10 +910,17 @@ def main():
             model._set_skip_append(False)
         del fb
 
-    tap = None
+    tap, iq_raw = None, None
     if args.tap:
         host, port = args.tap.rsplit(":", 1)
         tap = (socket.socket(socket.AF_INET, socket.SOCK_DGRAM), (host, int(port)))
+        sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fly"))
+        try:
+            from iq import raw as iq_raw
+        except ImportError:
+            iq_raw = None
+    from collections import deque
+    win = deque(maxlen=max(1, args.snap_win)) if args.snap else None
 
     print("Streaming... (Ctrl-C to stop and keep the viewer up)")
     for tensor, rgb in source:
@@ -956,19 +964,23 @@ def main():
             n = raw["conf"][0][::args.downsample_factor, ::args.downsample_factor].size
             kc = raw["kept_conf"]
             cen = cam_pose(extrinsic[-1])[1]
-            tap[0].sendto(json.dumps({"t": t_frame, "f": frame_idx, "q": len(pts) / max(n, 1),
-                                      "c": float(kc.mean()) if len(kc) else 0.0,
-                                      "p": [float(v) for v in cen]}).encode(),
-                          tap[1])
+            msg = {"t": t_frame, "f": frame_idx, "q": len(pts) / max(n, 1),
+                   "c": float(kc.mean()) if len(kc) else 0.0, "p": [float(v) for v in cen]}
+            if iq_raw is not None:
+                msg["iq"] = iq_raw(rgb)
+            tap[0].sendto(json.dumps(msg).encode(), tap[1])
 
-        if args.snap and frame_idx % args.snap_every == 0:
-            sp, scol = point_map.snapshot()
-            if len(sp) > args.snap_points:
-                keep = np.random.default_rng(frame_idx).choice(len(sp), args.snap_points, replace=False)
-                sp, scol = sp[keep], scol[keep]
-            tmp = args.snap + ".tmp.npz"
-            np.savez(tmp, points=sp, colors=scol, frame=frame_idx, t=t_frame)
-            os.replace(tmp, args.snap)
+        if win is not None:
+            win.append((t_frame, pts.copy(), cols.copy()))
+            if frame_idx % args.snap_every == 0:
+                sp = np.concatenate([w[1] for w in win])
+                scol = np.concatenate([w[2] for w in win])
+                if len(sp) > args.snap_points:
+                    keep = np.random.default_rng(frame_idx).choice(len(sp), args.snap_points, replace=False)
+                    sp, scol = sp[keep], scol[keep]
+                tmp = args.snap + ".tmp.npz"
+                np.savez(tmp, points=sp, colors=scol, frame=frame_idx, t=t_frame, t0=win[0][0])
+                os.replace(tmp, args.snap)
 
         if want_artifacts and (frame_idx % args.artifact_every == 0):
             save_frame_artifacts(art_frames_dir, [frame_idx], raw, [rgb])

@@ -4,12 +4,12 @@ import math
 from link import M, conn, off, ne, upload
 
 
-def lanes(a, b, gap, yaw):
+def lanes(a, b, gap, yaw, ext=0.0):
     lat0, lon0 = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
     pts = [ne(lat0, lon0, *a), ne(lat0, lon0, *b), ne(lat0, lon0, a[0], b[1]), ne(lat0, lon0, b[0], a[1])]
     c, s = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
     rot = [(n * c + e * s, -n * s + e * c) for n, e in pts]
-    u0, u1 = min(p[0] for p in rot), max(p[0] for p in rot)
+    u0, u1 = min(p[0] for p in rot) - ext, max(p[0] for p in rot) + ext
     v0, v1 = min(p[1] for p in rot), max(p[1] for p in rot)
     k = max(1, math.ceil((v1 - v0) / gap))
     out = []
@@ -21,8 +21,8 @@ def lanes(a, b, gap, yaw):
     return out
 
 
-def plan(a, b, alt, gap, yaw, speed, hold):
-    wps = lanes(a, b, gap, yaw)
+def plan(a, b, alt, gap, yaw, speed, hold, ext=0.0):
+    wps = lanes(a, b, gap, yaw, ext)
     it = [(M.MAV_CMD_NAV_WAYPOINT, *wps[0], 0, (0, 0, 0, 0)),
           (M.MAV_CMD_NAV_TAKEOFF, 0, 0, alt, (0, 0, 0, 0)),
           (M.MAV_CMD_DO_CHANGE_SPEED, 0, 0, 0, (1, speed, -1, 0))]
@@ -47,11 +47,12 @@ def main():
     p.add_argument("--yaw", type=float, default=0)
     p.add_argument("--speed", type=float, default=5)
     p.add_argument("--hold", type=float, default=20)
+    p.add_argument("--tilt", type=float, default=0)
     p.add_argument("--out", default="plan.json")
     p.add_argument("--url", default=None)
     g = p.parse_args()
     gap = g.gap or 2 * g.alt * math.tan(math.radians(g.fov / 2)) * (1 - g.side)
-    pl = plan(g.a, g.b, g.alt, gap, g.yaw, g.speed, g.hold)
+    pl = plan(g.a, g.b, g.alt, gap, g.yaw, g.speed, g.hold, g.alt * math.tan(math.radians(g.tilt)))
     json.dump(pl, open(g.out, "w"), indent=1)
     print(f"{len(pl['items']) - 5} wps, gap {gap:.1f} m -> {g.out}")
     if g.url:

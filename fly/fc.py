@@ -19,6 +19,8 @@ def alias(name, v):
         yield "RTL_ALT_M", v / 100
     elif name == "WPNAV_SPEED":
         yield "WP_SPD", v / 100
+    if name.startswith("GPS1_"):
+        yield "GPS_" + name[5:], v
     k = re.match(r"SR(\d)_(.+)", name)
     if k:
         yield f"MAV{int(k[1]) + 1}_{k[2]}", v

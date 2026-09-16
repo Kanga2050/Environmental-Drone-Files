@@ -2,14 +2,42 @@ import argparse
 import bisect
 import json
 import math
+import multiprocessing
 import queue
 import socket
 import threading
 import time
+import os
+from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 import geo
 import plan
+from iq import Score
 from link import M, conn, beat, ne, off, upload, cmd, mode, goto
+
+
+SC = None
+
+
+def boot(model, threads):
+    global SC
+    import torch
+    from scan import Scanner
+    torch.set_num_threads(threads)
+    SC = Scanner(model)
+
+
+def job(snap, T, box, icell):
+    from scan import cells
+    d = np.load(snap)
+    p = geo.apply(T, d["points"].astype(np.float64))
+    c = d["colors"].astype(np.float32) / 255.0
+    n0, n1, e0, e1 = box
+    m = (p[:, 0] > e0) & (p[:, 0] < e1) & (p[:, 1] > n0) & (p[:, 1] < n1)
+    if m.sum() < 2000:
+        return None, 0
+    ps, pq, _ = SC(p[m], c[m])
+    return cells(p[m], ps, pq, icell, (e0, n0), (e1, n1)), int(m.sum())
 
 
 class Ctl:
@@ -33,16 +61,22 @@ class Ctl:
         self.adj = time.time()
         self.todo, self.tgt, self.arr, self.sent, self.t0 = [], None, None, 0, 0
         self.pairs, self.rc, self.pending, self.busy = [], 0, None, False
-        self.sc = None
+        self.isc, self.ic = Score(), {}
+        n0, n1, e0, e1 = self.box
+        self.lo = (e0, n0)
+        self.sh = (max(1, math.ceil((e1 - e0) / g.icell)), max(1, math.ceil((n1 - n0) / g.icell)))
+        self.mc = None
+        self.nt, self.nm, self.nb = 0, 0, 0
+        self.pool = None
         if g.model:
-            from scan import Scanner
-            self.sc = Scanner(g.model)
+            self.pool = ProcessPoolExecutor(1, mp_context=multiprocessing.get_context("spawn"), initializer=boot, initargs=(g.model, g.threads))
+            threading.Thread(target=self.watch, daemon=True).start()
 
     def mav(self, r):
         k = r.get_type()
         if k == "GLOBAL_POSITION_INT":
             self.ts.append(time.time())
-            self.pos.append((r.lat / 1e7, r.lon / 1e7, r.relative_alt / 1e3))
+            self.pos.append((r.lat / 1e7, r.lon / 1e7, r.relative_alt / 1e3, (r.hdg if r.hdg != 65535 else 0) / 100))
             if len(self.ts) > 4000:
                 del self.ts[:1000], self.pos[:1000]
         elif k == "MISSION_CURRENT":
@@ -74,18 +108,40 @@ class Ctl:
     def tap(self, d):
         if self.m.flightmode not in ("AUTO", "GUIDED"):
             return
+        self.nt += 1
         p = self.at(d["t"] - self.g.lag)
         if p is None or p[2] < 3:
             return
+        self.nm += 1
+        n, e = ne(*self.o, p[0], p[1])
         if "p" in d:
-            n, e = ne(*self.o, p[0], p[1])
-            self.pairs.append((d["p"], (e, n, p[2])))
-            if len(self.pairs) > 20000:
-                del self.pairs[:5000]
+            self.pairs.append((d["t"], d["p"], (e, n, p[2])))
+            if len(self.pairs) > 40000:
+                del self.pairs[:10000]
+        q = d.get("q")
+        if "iq" in d:
+            qi = self.isc(d["iq"])
+            if qi is not None:
+                r = min(p[2] * math.tan(math.radians(self.g.tilt)), self.g.reach)
+                h = math.radians(p[3])
+                w = math.hypot(p[2], r) * math.tan(math.radians(self.g.hfov / 2)) * 0.6
+                fe, fn = e + r * math.sin(h), n + r * math.cos(h)
+                hit = False
+                for f, wt in ((-1, 0.4), (-0.5, 0.8), (0, 1.0), (0.5, 0.8), (1, 0.4)):
+                    f *= self.g.spread
+                    k = (math.floor((fe + f * w * math.cos(h) - self.lo[0]) / self.g.icell),
+                         math.floor((fn - f * w * math.sin(h) - self.lo[1]) / self.g.icell))
+                    s = self.ic.setdefault(k, [0.0, 0])
+                    s[0] += wt * qi
+                    s[1] += wt
+                    hit = hit or (0 <= k[0] < self.sh[0] and 0 <= k[1] < self.sh[1])
+                self.nb += hit
+        if q is None:
+            return
         s = self.cells.setdefault(self.key(p[0], p[1]), [0.0, 0])
-        s[0] += d["q"]
+        s[0] += q
         s[1] += 1
-        self.win.append((d["t"], d["q"]))
+        self.win.append((d["t"], q))
 
     def bad(self):
         c = self.g.cell
@@ -127,8 +183,80 @@ class Ctl:
         mode(self.m, "GUIDED")
         return True
 
+    def watch(self):
+        last = 0
+        while True:
+            time.sleep(1)
+            try:
+                mt = os.path.getmtime(self.g.snap)
+            except OSError:
+                continue
+            if mt == last:
+                continue
+            last = mt
+            try:
+                d = np.load(self.g.snap)
+                t0, t1 = float(d["t0"]) - 1, float(d["t"]) + 1
+                pr = list(self.pairs)
+                A = np.array([x[1] for x in pr])
+                B = np.array([x[2] for x in pr])
+                if len(A) < 60 or np.linalg.svd(B[:, :2] - B[:, :2].mean(0), compute_uv=False)[1] / np.sqrt(len(B)) < 2:
+                    print(f"window waiting: {len(A)} pose pairs, need a 2D flight path")
+                    continue
+                T, _ = geo.robust(A, B)
+                w = np.array([t0 <= x[0] <= t1 for x in pr])
+                if w.sum() < 10:
+                    continue
+                res = B[w] - geo.apply(T, A[w])
+                sh = np.median(res, 0)
+                T = (T[0], T[1], T[2] + sh)
+                err = float(np.median(np.linalg.norm(res - sh, axis=1)))
+                if err > self.g.maxerr:
+                    print(f"window skipped, fit {err:.1f} m")
+                    continue
+                cl, k = self.pool.submit(job, self.g.snap, T, self.box, self.g.icell).result()
+                if cl is None:
+                    continue
+                self.merge(cl)
+                print(f"window {int(d['frame'])}: {k:,} pts, fit {err:.2f} m")
+            except Exception as ex:
+                print(f"window failed: {ex}")
+
+    def merge(self, cl):
+        n = cl["n"].astype(float)
+        if self.mc is None:
+            self.mc = {"n": np.zeros(self.sh), "top": np.full(self.sh, np.nan)}
+            for k in ("ground", "lowveg", "plant", "struct"):
+                self.mc[k] = np.zeros(self.sh)
+        mc = self.mc
+        for k in ("ground", "lowveg", "plant", "struct"):
+            mc[k] += cl[k] * n
+        mc["n"] += n
+        top = np.where((n > 20) & (cl["top"] < self.g.maxtop), cl["top"], np.nan)
+        mc["top"] = np.fmax(mc["top"], top)
+
+    def grid(self):
+        n, s = np.zeros(self.sh), np.zeros(self.sh)
+        for (i, j), (a, k) in self.ic.items():
+            if 0 <= i < self.sh[0] and 0 <= j < self.sh[1]:
+                s[i, j] += a
+                n[i, j] += k
+        cl = {"lo": list(self.lo), "size": self.g.icell, "shape": list(self.sh), "n": n,
+              "bad": np.where(n > 0, 1 - s / np.maximum(n, 1), 0.0), "thin": np.zeros(self.sh)}
+        mc = self.mc
+        if mc is not None and mc["n"].sum() > 0:
+            mn = np.maximum(mc["n"], 1)
+            for k in ("ground", "lowveg", "plant", "struct"):
+                cl[k] = mc[k] / mn
+            cl["top"] = mc["top"]
+        else:
+            for k in ("ground", "lowveg", "plant", "struct"):
+                cl[k] = np.zeros(self.sh)
+            cl["top"] = np.full(self.sh, np.nan)
+        return cl
+
     def scan(self):
-        if self.busy or not self.sc:
+        if self.busy:
             return False
         self.busy = True
         threading.Thread(target=self.work, daemon=True).start()
@@ -137,34 +265,23 @@ class Ctl:
     def work(self):
         try:
             g = self.g
-            if len(self.pairs) < 30:
-                raise RuntimeError(f"only {len(self.pairs)} pose pairs")
-            a, b = np.array([x[0] for x in self.pairs]), np.array([x[1] for x in self.pairs])
-            if np.ptp(b[:, :2], 0).max() < 5:
-                raise RuntimeError("flight too small to align")
-            T, err = geo.robust(a, b)
-            d = np.load(g.snap)
-            p = geo.apply(T, d["points"].astype(np.float64))
-            c = d["colors"].astype(np.float32) / 255.0
-            n0, n1, e0, e1 = self.box
-            pad = g.pad
-            m = (p[:, 0] > e0 - pad) & (p[:, 0] < e1 + pad) & (p[:, 1] > n0 - pad) & (p[:, 1] < n1 + pad)
-            print(f"scan: {m.sum():,} pts, scale {T[0]:.2f}, fit {err:.2f} m")
-            t = time.time()
-            from scan import cells, save
-            ps, pq, nj = self.sc(p[m], c[m])
-            cl = cells(p[m], ps, pq, g.scell, (e0, n0), (e1, n1))
+            cl = self.grid()
+            heights = np.isfinite(cl["top"]).any()
+            from scan import save
             save("scan_cells.npz", cl)
             q = self.pos[-1]
             n, e = ne(*self.o, q[0], q[1])
-            cfg = plan.Cfg(amin=g.samin, amax=g.amax, budget=g.budget, speed=g.sspeed, thr=g.thr, clear=g.clear)
+            cfg = plan.Cfg(amin=g.samin if heights else g.safe, amax=g.amax, budget=g.budget, speed=g.sspeed,
+                           thr=g.thr, clear=g.clear, minn=g.iminn)
             ins, it, pri, order, transit, dur = plan.build(cl, self.o, (e, n), cfg)
-            print(f"scan took {time.time() - t:.1f} s ({nj} patches)")
+            seen = int((cl["n"] >= g.iminn).sum())
+            print(f"frames: {self.nt} received, {self.nm} matched to GPS, {self.nb} in box")
+            print(f"scan: {seen}/{cl['n'].size} cells seen, {int(cl['n'].sum())} frames, heights {'from map' if heights else 'none, safe alt ' + str(g.safe)}")
             plan.show(ins, transit, dur)
             json.dump({"origin": self.o, "instructions": ins, "items": it}, open("survey.json", "w"), indent=1)
+            np.save("survey_pri.npy", pri)
             if not ins:
                 print("nothing worth resurveying")
-                self.redo()
                 return
             self.pending = it
             if g.approve == "auto":
@@ -209,8 +326,7 @@ class Ctl:
                     self.retarget(na)
             if self.cur == self.loit and not self.done:
                 self.done = True
-                if not self.scan():
-                    self.redo()
+                self.scan()
         elif self.state == "redo":
             if fm != "GUIDED" and now - self.t0 > 3:
                 print(f"pilot took over ({fm})")
@@ -282,10 +398,18 @@ def main():
     p.add_argument("--maxre", type=int, default=12)
     p.add_argument("--bat", type=int, default=35)
     p.add_argument("--model", default=None)
+    p.add_argument("--icell", type=float, default=4.0)
+    p.add_argument("--iminn", type=int, default=3)
+    p.add_argument("--tilt", type=float, default=55.0)
+    p.add_argument("--reach", type=float, default=30.0)
+    p.add_argument("--hfov", type=float, default=120.0)
+    p.add_argument("--spread", type=float, default=0.5)
+    p.add_argument("--safe", type=float, default=15.0)
+    p.add_argument("--maxerr", type=float, default=2.0)
+    p.add_argument("--maxtop", type=float, default=25.0)
+    p.add_argument("--threads", type=int, default=2)
     p.add_argument("--snap", default="live.npz")
     p.add_argument("--approve", choices=["rc", "key", "auto"], default="rc")
-    p.add_argument("--scell", type=float, default=2.0)
-    p.add_argument("--pad", type=float, default=4.0)
     p.add_argument("--samin", type=float, default=6.0)
     p.add_argument("--sspeed", type=float, default=4.0)
     p.add_argument("--thr", type=float, default=0.45)
@@ -327,4 +451,5 @@ def main():
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()
