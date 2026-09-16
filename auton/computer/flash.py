@@ -53,7 +53,7 @@ def main():
     if not dfu:
         raise SystemExit("dfu-util not found")
     subprocess.run([dfu, "-a", "0", "-d", "0483:df11", "-s", f"0x{lo:08x}:mass-erase:force:leave", "-D", "arducopter_with_bl.bin"], check=True)
-    print("flashed; it reboots into ArduPilot. next: python fc.py manta.parm --url COMx --reboot")
+    print("flashed; it reboots into ArduPilot. next: python auton/computer/fc.py --url COMx --reboot")
 
 
 if __name__ == "__main__":

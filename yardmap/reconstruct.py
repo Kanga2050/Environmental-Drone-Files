@@ -554,9 +554,9 @@ def build_parser():
                              "this catches hazy horizons at the cost of bright walls")
     parser.add_argument("--compact_every", type=int, default=30)
     parser.add_argument("--tap", type=str, default=None,
-                        help="HOST:PORT to send per-frame map quality to fly/ctl.py")
+                        help="HOST:PORT to send per-frame map quality to auton/computer/ctl.py")
     parser.add_argument("--snap", type=str, default=None,
-                        help="Write the live map to this .npz for fly/ctl.py scans")
+                        help="Write the live map to this .npz for auton/computer/ctl.py scans")
     parser.add_argument("--snap_every", type=int, default=60)
     parser.add_argument("--snap_win", type=int, default=120)
     parser.add_argument("--snap_points", type=int, default=600000)
@@ -891,7 +891,7 @@ class Feed:
         if args.tap:
             host, port = args.tap.rsplit(":", 1)
             self.sock, self.addr = socket.socket(socket.AF_INET, socket.SOCK_DGRAM), (host, int(port))
-            sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fly"))
+            sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "auton", "computer"))
             try:
                 from iq import raw as iq
                 self.iq = iq

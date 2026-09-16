@@ -1,4 +1,5 @@
 import argparse
+import os
 import re
 import time
 from link import M, conn, cmd
@@ -59,7 +60,7 @@ def put(m, name, v, tries=3):
 
 def main():
     a = argparse.ArgumentParser()
-    a.add_argument("parm", nargs="?", default="manta.parm")
+    a.add_argument("parm", nargs="?", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "drone", "manta.parm"))
     a.add_argument("--url", default="COM3")
     a.add_argument("--baud", type=int, default=115200)
     a.add_argument("--check", action="store_true")
