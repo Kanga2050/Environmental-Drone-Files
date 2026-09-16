@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Map viewer</title>
+<link rel="stylesheet" href="/static/style.css">
+<script type="importmap">
+{"imports": {"three": "/static/vendor/three.module.js"}}
+</script>
+</head>
+<body>
+
+<div id="stage">
+  <canvas id="gl"></canvas>
+  <div id="labels"></div>
+  <svg id="overlaySvg"></svg>
+  <img id="framePhoto" alt="">
+  <div id="rubber"></div>
+  <div id="crosshair">+</div>
+
+  <div id="hud">
+    <span id="hudMode">fly</span>
+    <span class="sep"></span>
+    <span id="hudSpeed">1.00 m/s</span>
+    <span class="sep"></span>
+    <span id="hudInfo"></span>
+  </div>
+
+  <div id="toolbar">
+    <button data-tool="fly"     title="Fly around (W A S D, Space, Shift)">Fly</button>
+    <button data-tool="select"  title="Drag a rectangle to select points (or hold Ctrl in any mode)">Select</button>
+    <button data-tool="measure" title="Click two points to measure between them">Measure</button>
+    <button data-tool="pick"    title="Click a point to inspect it">Inspect</button>
+    <span class="tb-sep"></span>
+    <button id="btnHelp" title="Keyboard reference">?</button>
+  </div>
+
+  <div id="help" class="hidden">
+    <h3>Controls</h3>
+    <table>
+      <tr><td>W A S D</td><td>move (relative to where you look)</td></tr>
+      <tr><td>Space / Shift</td><td>up / down along gravity</td></tr>
+      <tr><td>drag mouse</td><td>look around</td></tr>
+      <tr><td>scroll</td><td>move forward / back</td></tr>
+      <tr><td>- / =</td><td>slower / faster</td></tr>
+      <tr><td>Ctrl + drag</td><td>rectangle-select points</td></tr>
+      <tr><td>Esc</td><td>clear selection, leave frame view</td></tr>
+      <tr><td colspan="2" class="gap"></td></tr>
+      <tr><td>F</td><td>fly to the selected plant</td></tr>
+      <tr><td>I</td><td>isolate the selection</td></tr>
+      <tr><td>H</td><td>plant recolour on / off</td></tr>
+      <tr><td>G</td><td>stand in the selected frame</td></tr>
+      <tr><td>O</td><td>photo overlay on / off</td></tr>
+      <tr><td>P</td><td>points this frame produced</td></tr>
+      <tr><td>M</td><td>measure tool</td></tr>
+      <tr><td>R</td><td>reset the view</td></tr>
+      <tr><td>L</td><td>level the horizon (after leaving a rolled frame)</td></tr>
+    </table>
+    <p class="dim">Click anywhere to dismiss.</p>
+  </div>
+
+  <div id="loading"><div class="bar"><i></i></div><span>loading…</span></div>
+</div>
+
+<div id="side">
+  <div id="tabs">
+    <button data-tab="plants" class="on">Plants</button>
+    <button data-tab="frames">Frames</button>
+    <button data-tab="sel">Selection</button>
+    <button data-tab="view">View</button>
+  </div>
+
+  <div id="tab-plants" class="tab on">
+    <div class="ctl">
+      <label>Min detection conf <b id="confVal">0.15</b></label>
+      <input id="confSlider" type="range" min="0" max="1" step="0.01" value="0.15">
+    </div>
+    <div class="ctl row">
+      <input id="plantSearch" type="search" placeholder="filter by name, species, id…">
+      <select id="plantSort">
+        <option value="id">order: id</option>
+        <option value="conf">order: confidence</option>
+        <option value="points">order: cloud points</option>
+        <option value="height">order: height</option>
+        <option value="volume">order: volume</option>
+        <option value="views">order: views</option>
+      </select>
+    </div>
+    <div class="ctl row tight">
+      <label><input id="onlyNamed" type="checkbox"> named only</label>
+      <label><input id="onlyVisible" type="checkbox"> in view only</label>
+    </div>
+    <div class="ctl row tight" style="margin-bottom:8px">
+      <button class="act" id="exportCsv">Export table (CSV)</button>
+      <span id="plantCount" class="t2" style="color:var(--dim);font-size:11px"></span>
+    </div>
+    <div id="plantList"></div>
+  </div>
+
+  <div id="tab-frames" class="tab">
+    <div class="ctl">
+      <label>Frame <b id="frameVal">—</b> of <b id="frameCount">0</b></label>
+      <input id="frameSlider" type="range" min="0" max="0" step="1" value="0">
+    </div>
+    <div class="ctl row tight">
+      <button id="framePrev" title="Previous frame">◀</button>
+      <button id="framePlay" title="Step through the frames (K)">▶ Play</button>
+      <button id="frameNext" title="Next frame">▶</button>
+    </div>
+    <div class="ctl row tight">
+      <button id="frameEnter" title="Put the camera exactly where this one was">
+        Stand here (G)</button>
+    </div>
+    <div class="ctl">
+      <label>Playback <b id="rateVal">6</b> frames/s</label>
+      <input id="rateSlider" type="range" min="1" max="30" step="1" value="6">
+    </div>
+    <div class="ctl row tight">
+      <label><input id="buildUp" type="checkbox"> reveal the map as it was built</label>
+    </div>
+    <div class="ctl">
+      <label>Photo overlay <b id="opacityVal">0%</b></label>
+      <input id="opacitySlider" type="range" min="0" max="100" step="1" value="0">
+    </div>
+    <div class="ctl row tight">
+      <label><input id="showSeen" type="checkbox"> cloud points it supports</label>
+    </div>
+    <div class="ctl row tight">
+      <label><input id="showOwn" type="checkbox"> its own depth map</label>
+      <label><input id="showFrusta" type="checkbox" checked> cameras</label>
+    </div>
+    <div class="ctl row tight">
+      <label><input id="showAxes" type="checkbox" checked> orientation axes</label>
+      <label><input id="showPhotos" type="checkbox"> photos on cameras</label>
+    </div>
+    <div class="ctl row tight">
+      <label><input id="showCreated" type="checkbox"> points it created</label>
+    </div>
+    <div id="frameInfo" class="info"></div>
+    <div id="frameStrip"></div>
+  </div>
+
+  <div id="tab-sel" class="tab">
+    <div id="selBody" class="info dim">
+      Nothing selected. Hold <b>Ctrl</b> and drag a rectangle over the cloud, or
+      click a plant.
+    </div>
+  </div>
+
+  <div id="tab-view" class="tab">
+    <div class="ctl">
+      <label>Colour by</label>
+      <select id="colorMode">
+        <option value="0">photo colour</option>
+        <option value="1">height above ground</option>
+        <option value="2">contributing pixels</option>
+        <option value="3">last seen (time in video)</option>
+      </select>
+    </div>
+    <div class="ctl">
+      <label>Point size <b id="psVal">0.0010</b></label>
+      <input id="psSlider" type="range" min="0.0005" max="0.02" step="0.0005" value="0.001">
+    </div>
+    <div class="ctl">
+      <label>Density <b id="denVal">100%</b></label>
+      <input id="denSlider" type="range" min="2" max="100" step="1" value="100">
+    </div>
+    <div class="ctl">
+      <label>Plant tint <b id="tintVal">100%</b></label>
+      <input id="tintSlider" type="range" min="0" max="100" step="1" value="100">
+    </div>
+    <div class="ctl">
+      <label>Brightness <b id="briVal">1.00</b></label>
+      <input id="briSlider" type="range" min="0.4" max="2.5" step="0.05" value="1">
+    </div>
+    <div class="ctl row tight">
+      <label><input id="cbHighlight" type="checkbox" checked> recolour plants</label>
+      <label><input id="cbBoxes" type="checkbox" checked> 3D boxes</label>
+    </div>
+    <div class="ctl row tight">
+      <label><input id="cbLabels" type="checkbox" checked> labels</label>
+      <label><input id="cbSpecies" type="checkbox" checked> species in label</label>
+    </div>
+    <div class="ctl row tight">
+      <label><input id="cbGround" type="checkbox"> ground grid</label>
+      <label><input id="cbTraj" type="checkbox" checked> flight path</label>
+    </div>
+    <div class="ctl">
+      <label>Move speed <b id="spdVal">1.00</b></label>
+      <input id="spdSlider" type="range" min="0.05" max="8" step="0.05" value="1">
+    </div>
+
+    <h4 style="margin:14px 0 5px;font-size:11px;color:var(--dim);
+        text-transform:uppercase;letter-spacing:.06em">Scale</h4>
+    <div id="scaleState" class="note"></div>
+    <div class="ctl row" style="margin-top:6px">
+      <input id="scaleTrue" type="text" placeholder="true length, metres">
+      <button class="act" id="scaleApply">Set</button>
+      <button class="act" id="scaleReset">Reset</button>
+    </div>
+    <p class="note">Measure something you know the size of (a brick course, a
+    fence panel, a doorway), then type its real length here. Monocular
+    reconstruction fixes shape but not size, so every distance below is in
+    arbitrary units until you do this once.</p>
+
+    <div id="sceneInfo" class="info"></div>
+  </div>
+</div>
+
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
