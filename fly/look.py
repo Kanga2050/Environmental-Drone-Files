@@ -11,10 +11,10 @@ from iq import raw, Score
 class Cam:
     def __init__(self, src, fps):
         self.file = not str(src).isdigit()
-        self.cap = cv2.VideoCapture(int(src) if not self.file else src)
+        self.cap = cv2.VideoCapture(src) if self.file else cv2.VideoCapture(int(src), cv2.CAP_DSHOW)
         if not self.cap.isOpened():
             raise SystemExit(f"cannot open {src}")
-        self.fps = self.cap.get(cv2.CAP_PROP_FPS) or fps
+        self.fps = max(self.cap.get(cv2.CAP_PROP_FPS), 0) or fps
         self.frame, self.t, self.n, self.done = None, 0.0, 0, False
         self.lock = threading.Lock()
         threading.Thread(target=self.run, daemon=True).start()
