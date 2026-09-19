@@ -20,6 +20,8 @@ def alias(name, v):
         yield "RTL_ALT_M", v / 100
     elif name == "WPNAV_SPEED":
         yield "WP_SPD", v / 100
+    elif name.startswith("ATC_ACCEL_"):
+        yield "ATC_ACC_" + name[10:], v / 100
     if name.startswith("GPS1_"):
         yield "GPS_" + name[5:], v
     k = re.match(r"SR(\d)_(.+)", name)
