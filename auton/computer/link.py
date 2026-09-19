@@ -5,12 +5,18 @@ from pymavlink import mavutil
 M = mavutil.mavlink
 R = 6378137.0
 REL = M.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+BP = ("10.0.0.1", 14555)
 
 
 def conn(url, wait=60):
     m = mavutil.mavlink_connection(url, source_system=255, source_component=M.MAV_COMP_ID_MISSIONPLANNER)
-    if not m.wait_heartbeat(timeout=wait):
-        raise SystemExit(f"no heartbeat on {url}")
+    if url.startswith("udpin"):
+        m.last_address = BP
+    end = time.time() + wait
+    while not m.wait_heartbeat(timeout=1):
+        if time.time() > end:
+            raise SystemExit(f"no heartbeat on {url}")
+        beat(m)
     for i, hz in ((33, 4), (42, 1), (1, 1), (65, 2)):
         cmd(m, M.MAV_CMD_SET_MESSAGE_INTERVAL, i, 1e6 / hz)
     return m
