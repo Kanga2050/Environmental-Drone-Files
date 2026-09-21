@@ -32,7 +32,7 @@ end
 
 local function run(event)
   bg()
-  local rq, sats, v, pct, alt = num("RQly"), num("Sats"), num("RxBt"), num("Bat%"), num("Alt")
+  local rq, sats, v, pct, alt = num("RQly"), num("Sats"), num("RxBt"), num("Bat%"), num("GAlt")
   lcd.clear()
   lcd.drawText(1, 1, "MANTA", MIDSIZE)
   lcd.drawText(48, 4, txt("FM"), INVERS)
