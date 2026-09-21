@@ -40,6 +40,16 @@ local function run(event)
   lcd.drawText(64, 18, string.format("Sats %2d", math.floor(sats)), sats < 8 and BLINK or 0)
   lcd.drawText(1, 28, string.format("Bat %4.1fV %3d%%", v, math.floor(pct)), (pct > 0 and pct < 30) and BLINK or 0)
   lcd.drawText(1, 38, string.format("Alt %4.0fm", alt), 0)
+  local fm = txt("FM")
+  local st = "READY"
+  if string.find(fm, "*", 1, true) then
+    st = "ARMED"
+  elseif sats < 10 then
+    st = "GPS WAIT"
+  elseif v < 23 then
+    st = "BAT LOW"
+  end
+  lcd.drawText(64, 38, st, st == "READY" and 0 or INVERS)
   local p = getValue("sd") > 0
   local flag = p and INVERS or 0
   if p and getTime() - sent < 300 then
