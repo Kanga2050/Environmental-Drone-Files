@@ -57,7 +57,6 @@
       <tr><td>R</td><td>reset the view</td></tr>
       <tr><td>L</td><td>level the horizon (after leaving a rolled frame)</td></tr>
     </table>
-    <p class="dim">Click anywhere to dismiss.</p>
   </div>
 
   <div id="loading"><div class="bar"><i></i></div><span>loading…</span></div>
@@ -143,8 +142,7 @@
 
   <div id="tab-sel" class="tab">
     <div id="selBody" class="info dim">
-      Nothing selected. Hold <b>Ctrl</b> and drag a rectangle over the cloud, or
-      click a plant.
+      Nothing selected.
     </div>
   </div>
 
@@ -190,18 +188,6 @@
       <label>Move speed <b id="spdVal">1.00</b></label>
       <input id="spdSlider" type="range" min="0.05" max="8" step="0.05" value="1">
     </div>
-
-    <h4>Scale</h4>
-    <div id="scaleState" class="note"></div>
-    <div class="ctl row" style="margin-top:6px">
-      <input id="scaleTrue" type="text" placeholder="true length, metres">
-      <button class="act" id="scaleApply">Set</button>
-      <button class="act" id="scaleReset">Reset</button>
-    </div>
-    <p class="note">Measure something you know the size of (a brick course, a
-    fence panel, a doorway), then type its real length here. Monocular
-    reconstruction fixes shape but not size, so every distance below is in
-    arbitrary units until you do this once.</p>
 
     <div id="sceneInfo" class="info"></div>
   </div>

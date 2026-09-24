@@ -1151,8 +1151,9 @@ def main():
             "detection_score": round(float(best["score"]), 3),
             "crop": best_crop["crop"],
             "frames": sorted({int(m["frame"]) for m in members}),
-            "boxes": [{"frame": int(m["frame"]), "box": m["box_src"], "crop": m["crop"]}
-                      for m in members],
+            "best_frame": int(best["frame"]),
+            "boxes": [{"frame": int(m["frame"]), "box": m["box_src"], "crop": m["crop"],
+                       "score": round(float(m["score"]), 3)} for m in members],
         })
 
     pts_path = os.path.join(art, "plant_points.npz")
