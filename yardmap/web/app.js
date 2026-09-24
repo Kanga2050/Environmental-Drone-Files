@@ -36,7 +36,7 @@ const renderer = new THREE.WebGLRenderer({
 });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 1.75));
 renderer.autoClear = false;
-const BG = new THREE.Color(0x000000);
+const BG = new THREE.Color(0xffffff);
 
 const world = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(60, 1, 0.01, 500);
@@ -110,7 +110,7 @@ function adoptPose(basis) {
 }
 
 const cloudUniforms = {
-  uSize: { value: 0.001 },
+  uSize: { value: 0.04 },
   uPx: { value: 500.0 },
   uTint: { value: 1.0 },
   uBright: { value: 1.0 },
