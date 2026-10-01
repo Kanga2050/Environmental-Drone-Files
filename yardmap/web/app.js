@@ -36,7 +36,7 @@ const renderer = new THREE.WebGLRenderer({
 });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 1.75));
 renderer.autoClear = false;
-const BG = new THREE.Color(0xffffff);
+const BG = new THREE.Color(0x0e1013);
 
 const world = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(60, 1, 0.01, 500);
@@ -110,7 +110,7 @@ function adoptPose(basis) {
 }
 
 const cloudUniforms = {
-  uSize: { value: 0.04 },
+  uSize: { value: 0.001 },
   uPx: { value: 500.0 },
   uTint: { value: 1.0 },
   uBright: { value: 1.0 },
@@ -269,6 +269,7 @@ async function boot() {
   cloud.frustumCulled = false;
   world.add(cloud);
 
+  loadScale();
   buildPalette();
   buildBoxes();
   buildHelpers();
@@ -279,7 +280,7 @@ async function boot() {
                     get overlay() { return overlay; }, THREE,
                     selectRect, pickPoint, applySelection, viewProj };
 
-  setSpeed(S.speed);
+  refreshUnits();
   invalidate(4);
   dom.loading.classList.add("hidden");
   requestAnimationFrame(tick);
@@ -691,7 +692,9 @@ function clearSelection() {
   cloudUniforms.uSelTag.value = -1;
   cloudUniforms.uFade.value = 0;
   setOverlay(null);
-  dom.selBody.innerHTML = "Nothing selected.";
+  dom.selBody.innerHTML =
+    'Nothing selected. Hold <b>Ctrl</b> and drag a rectangle over the cloud, ' +
+    'or click a plant.';
   dom.selBody.classList.add("dim");
   renderPlantList();
   hudInfo("");
@@ -855,7 +858,10 @@ function updateMeasure() {
   const gn = v3(S.scene.ground.normal);
   const dv = Math.abs(b.clone().sub(a).dot(gn));
   const dh = Math.sqrt(Math.max(0, d * d - dv * dv));
+  S.lastMeasure = d;
   hudInfo(`${fmtLen(d)}   vertical ${fmtLen(dv)} · horizontal ${fmtLen(dh)}`);
+  const el = $("scaleTrue");
+  if (el && !el.value) el.placeholder = `true length of ${d.toFixed(3)} u, metres`;
 }
 
 function inspectPoint(x, y) {
@@ -881,7 +887,10 @@ function inspectPoint(x, y) {
       <div class="k">assigned to</div><div class="v">${
         tag >= 0 ? `#${S.scene.plants[tag].id} ${S.scene.plants[tag].category}`
                  : "—"}</div>
-    </div>`;
+    </div>
+    <p class="note">Excess green is <b>2G − R − B</b>. On this footage it does not
+    separate foliage from stucco, so read it as a colour statistic and not as a
+    plant test.</p>`;
 }
 
 async function applySelection(idx) {
@@ -925,13 +934,15 @@ function renderSelection(a) {
       <button class="act" id="selClear">Clear</button>
       <button class="act" id="selPly">Save .ply</button>
     </div>
+    ${named ? "" : `<p class="note">Start the viewer with
+      <code>--classify bioclip</code> to enable identification.</p>`}
     ${a.overlap && a.overlap.length ? `
       <h4>Overlaps detected plants</h4>
       <table class="res">${a.overlap.map((o) => `
         <tr><td>#${o.id} ${o.category}</td><td class="s">${o.n.toLocaleString()} pts</td></tr>`
       ).join("")}</table>` : `
       <h4>Overlaps detected plants</h4>
-      <p>none</p>`}
+      <p class="note">None — this region was not detected as a plant.</p>`}
     <h4>Best views of this region</h4>
     <div class="viewgrid">${(a.views || []).slice(0, 6).map((v) => `
       <figure data-frame="${v.frame}" class="vthumb">
@@ -939,6 +950,9 @@ function renderSelection(a) {
         <figcaption>#${v.frame} · ${(v.coverage * 100).toFixed(0)}% · ${
           fmtLen(v.distance)}</figcaption>
       </figure>`).join("")}</div>
+    <p class="note">Ranked by how much of the selection a frame sees and how
+    much of the frame it fills, so a crop taken here is the largest available.
+    Click one to stand in it.</p>
     <div id="idResult"></div>`;
 
   $("selIso").onclick = toggleIsolate;
@@ -973,6 +987,9 @@ async function identifySelection() {
     const top = r.results && r.results[0];
     out.innerHTML = `
       <h4>Identification · ${r.classifier}</h4>
+      ${top && top.score < 0.2 ? `<div class="warnbox">Top score
+        ${top.score.toFixed(3)} — below what is worth naming. Treat every row
+        below as a guess, not an identification.</div>` : ""}
       <table class="res">${(r.results || []).map((x) => `
         <tr><td>${x.name}${x.common ? `<br><span class="dim" style="font-size:10.5px">${
           x.common}</span>` : ""}</td>
@@ -1003,10 +1020,11 @@ function download(data, name, mime) {
 
 function exportPly(idx) {
   if (!idx || !idx.length) return;
-  const k = 1;
+  const k = S.calibrated ? S.scale : 1;
   const header =
     "ply\nformat binary_little_endian 1.0\n" +
     `comment exported from ${S.scene.artifacts}\n` +
+    `comment units ${S.calibrated ? "metres (calibrated)" : "arbitrary (uncalibrated)"}\n` +
     `element vertex ${idx.length}\n` +
     "property float x\nproperty float y\nproperty float z\n" +
     "property uchar red\nproperty uchar green\nproperty uchar blue\n" +
@@ -1066,44 +1084,76 @@ function selectPlant(i) {
 
 const rgbHex = (c) => (c[0] << 16) | (c[1] << 8) | c[2];
 
+const scaleKey = () => "lbm-scale:" + (S.scene ? S.scene.artifacts : "?");
+
+function loadScale() {
+  const v = parseFloat(localStorage.getItem(scaleKey()) || "");
+  S.scale = isFinite(v) && v > 0 ? v : 1;
+  S.calibrated = S.scale !== 1;
+}
+
+function saveScale(v) {
+  S.scale = v;
+  S.calibrated = true;
+  try { localStorage.setItem(scaleKey(), String(v)); } catch (e) {}
+  refreshUnits();
+}
+
+function resetScale() {
+  S.scale = 1; S.calibrated = false;
+  try { localStorage.removeItem(scaleKey()); } catch (e) {}
+  refreshUnits();
+}
+
 function fmtLen(v, digits = 1) {
   if (v == null || !isFinite(v)) return "—";
-  return v.toFixed(3) + " u";
+  if (!S.calibrated) return (v).toFixed(3) + " u";
+  const m = v * S.scale;
+  return Math.abs(m) >= 1 ? m.toFixed(2) + " m" : (m * 100).toFixed(digits) + " cm";
 }
 
 function fmtLenShort(v) {
   if (v == null || !isFinite(v)) return "";
-  return v.toFixed(2) + "u";
+  if (!S.calibrated) return v.toFixed(2) + "u";
+  const m = v * S.scale;
+  return m >= 1 ? m.toFixed(1) + "m" : (m * 100).toFixed(0) + "cm";
 }
 
 function fmtVol(v) {
   if (v == null || !isFinite(v)) return "—";
-  return v.toExponential(2) + " u³";
+  if (!S.calibrated) return v.toExponential(2) + " u³";
+  const l = v * S.scale ** 3 * 1000;
+  return l >= 1000 ? (l / 1000).toFixed(2) + " m³" : l.toFixed(1) + " L";
 }
 
-function frameConf(p, fid) {
-  const b = (p.boxes || []).filter((x) => x.frame === fid && x.score != null);
-  if (b.length) return Math.max(...b.map((x) => x.score));
-  const c = p.best_frame != null ? p.best_frame : (p.crop ? parseInt(p.crop, 10) : NaN);
-  return fid === c ? p.detection_score : null;
-}
-
-function rankedFrames(p) {
-  const c = p.best_frame != null ? p.best_frame : (p.crop ? parseInt(p.crop, 10) : NaN);
-  return (p.frames || [])
-    .filter((fid) => S.scene.frames.some((f) => f.id === fid))
-    .map((fid) => [fid, frameConf(p, fid)])
-    .sort((a, b) => ((b[1] ?? -1) - (a[1] ?? -1)) || ((b[0] === c) - (a[0] === c)))
-    .map((x) => x[0]);
+function refreshUnits() {
+  const el = $("scaleState");
+  if (el) {
+    el.innerHTML = S.calibrated
+      ? `Calibrated: <b>1 unit = ${S.scale.toFixed(4)} m</b>. Scene is
+         ${(S.scene.framing.radius * 2 * S.scale).toFixed(1)} m across.`
+      : `<b>Uncalibrated.</b> Lengths read as <b>u</b> (arbitrary units).`;
+  }
+  dom.hudSpeed.textContent = S.calibrated
+    ? (S.speed * S.scale).toFixed(2) + " m/s" : S.speed.toFixed(2) + " u/s";
+  renderPlantList();
+  if (S.selectedPlant >= 0) renderPlantDetail(S.selectedPlant);
+  else if (S.selection && S.selection.analysis) renderSelection(S.selection.analysis);
+  updateMeasure();
+  if ($("sceneInfo").innerHTML) renderSceneInfo();
 }
 
 function standAtPlant(i) {
-  const fid = rankedFrames(S.scene.plants[i])[0];
-  const k = S.scene.frames.findIndex((f) => f.id === fid);
-  if (k < 0) return false;
-  setFrame(k);
-  enterFrame(k);
-  return true;
+  const p = S.scene.plants[i];
+  for (const fid of p.frames || []) {
+    const k = S.scene.frames.findIndex((f) => f.id === fid);
+    if (k >= 0) {
+      setFrame(k);
+      enterFrame(k);
+      return true;
+    }
+  }
+  return false;
 }
 
 function flyToPlant(i) {
@@ -1152,7 +1202,8 @@ function speciesLine(p) {
 
 function distBars(p) {
   const cand = p.species_candidates || [];
-  if (!cand.length) return "";
+  const views = p.species_view_scores || [];
+  if (!cand.length && !views.length) return "";
   const top = p.species || "";
   let html = "";
   if (cand.length) {
@@ -1161,6 +1212,19 @@ function distBars(p) {
         <span class="bn">${c.name === top ? `<b>${c.name}</b>` : c.name}</span>
         <span class="bt"><i style="width:${Math.max(1, c.score * 100).toFixed(1)}%"></i></span>
         <span class="bv">${c.score.toFixed(3)}</span></div>`).join("") + `</div>`;
+  }
+  if (views.length) {
+    const tops = p.species_view_top1 || [];
+    html += `<div class="dist"><div class="distlab">across views &mdash; each
+      look's own score for ${top || "the reported name"}</div>` +
+      views.map((v, k) => {
+        const agree = tops[k] === top;
+        return `<div class="bar" title="${tops[k] || ""}">
+          <span class="bn">view ${k + 1}${agree ? " &#10003;" : ""}</span>
+          <span class="bt"><i class="${agree ? "ok" : "no"}"
+            style="width:${Math.max(1, v * 100).toFixed(1)}%"></i></span>
+          <span class="bv">${v.toFixed(3)}</span></div>`;
+      }).join("") + `</div>`;
   }
   return html;
 }
@@ -1205,6 +1269,8 @@ function renderPlantDetail(i) {
         (m.mean_rgb || []).map((v) => Math.round(v)).join(", ")}</div>
     </div>
     ${distBars(p)}
+    ${p.species_unsupported ? `<div class="warn">No individual view picked this
+      species &mdash; the name comes only from the averaged embedding.</div>` : ""}
     <div class="btnrow">
       <button class="act" id="pdFly">Fly to (F)</button>
       <button class="act" id="pdIso">Isolate (I)</button>
@@ -1212,10 +1278,13 @@ function renderPlantDetail(i) {
         S.scene.live_classifier === "none" ? "disabled" : ""}>Re-identify</button>
     </div>
     <h4>Seen in ${p.frames.length} recorded frames</h4>
-    <div class="viewgrid">${rankedFrames(p).slice(0, 8).map((fid) => `
+    <div class="viewgrid">${p.frames.slice(0, 8).map((fid) => `
       <figure class="vthumb" data-frame="${fid}">
         <img src="/api/frame/${fid}/thumb.jpg" loading="lazy">
         <figcaption>#${fid}</figcaption></figure>`).join("")}</div>
+    <p class="note">Stand in one of these to check the 3D box against the photo:
+    a box that sits on the plant here but drifts off it in another view is a
+    merge error rather than a detection.</p>
     <div id="idResult"></div>`;
   $("pdFly").onclick = () => flyToPlant(i);
   $("pdIso").onclick = toggleIsolate;
@@ -1302,6 +1371,7 @@ function togglePlay() {
   S.playAcc = 0;
   if (S.playing) {
     leaveFrame();
+    hudInfo("stepping through the recorded frames");
   }
 }
 
@@ -1386,20 +1456,11 @@ function updateFrameUI(light = false) {
         f.position.map((v) => v.toFixed(2)).join(", ")}</div>
       <div class="k">plants in frame</div><div class="v">${
         S.scene.plants.filter((p) => p.frames.includes(f.id)).length}</div>
-      ${frameConfRow(f)}
       ${seen != null ? `<div class="k">cloud points supported</div>
         <div class="v">${seen.toLocaleString()}</div>` : ""}
     </div>`;
 
   updateCurrentCamera(f);
-}
-
-function frameConfRow(f) {
-  const ps = S.selectedPlant >= 0 ? [S.scene.plants[S.selectedPlant]]
-    : S.scene.plants.filter((p) => p.frames.includes(f.id));
-  const v = ps.map((p) => frameConf(p, f.id)).filter((x) => x != null);
-  if (!v.length) return "";
-  return `<div class="k">confidence</div><div class="v">${Math.max(...v).toFixed(2)}</div>`;
 }
 
 function updateCurrentCamera(f) {
@@ -1535,16 +1596,26 @@ function buildUI() {
     S.rate = +e.target.value;
     $("rateVal").textContent = e.target.value;
   });
-  bind("buildUp", applyBuildUp, "change");
+  bind("buildUp", () => {
+    applyBuildUp();
+    if (!S.scene.provenance) {
+      hudInfo("rebuild with --fuse average to replay how the map was built");
+    }
+  }, "change");
   $("framePlay").onclick = togglePlay;
   if (!S.scene.provenance) $("buildUp").disabled = true;
 
   bind("colorMode", (e) => setColorMode(+e.target.value), "change");
   if (!S.scene.provenance) {
     [...$("colorMode").options].forEach((o) => {
-      if (o.value === "2" || o.value === "3") o.disabled = true;
+      if (o.value === "2" || o.value === "3") {
+        o.disabled = true;
+        o.textContent += "  (needs --fuse average)";
+      }
     });
     $("showCreated").disabled = true;
+    $("showCreated").parentElement.title =
+      "Rebuild with --fuse average to record which frame created each point";
   }
   bind("showCreated", refreshFrameLayers, "change");
   bind("psSlider", (e) => {
@@ -1578,9 +1649,22 @@ function buildUI() {
 
   helperGroup.getObjectByName("frusta").visible = true;
 
+  $("scaleApply").onclick = () => {
+    const truth = parseFloat($("scaleTrue").value);
+    if (!isFinite(truth) || truth <= 0) { hudInfo("enter a length in metres"); return; }
+    if (!S.lastMeasure) {
+      hudInfo("measure something first: press M, then click two points");
+      return;
+    }
+    saveScale(truth / S.lastMeasure);
+    $("scaleTrue").value = "";
+    hudInfo(`scale set from a ${S.lastMeasure.toFixed(3)} u measurement`);
+  };
+  $("scaleReset").onclick = resetScale;
+
   $("exportCsv").onclick = () => {
-    const u = "u";
-    const k = 1;
+    const u = S.calibrated ? "m" : "u";
+    const k = S.calibrated ? S.scale : 1;
     const head = ["id", "category", "category_conf", "detection", "species",
                   "common", "species_raw", "species_vote", "agreement",
                   "view_spread", "sharpening", "entropy", "identified", "views",
@@ -1634,7 +1718,12 @@ function renderSceneInfo() {
       <div class="k">named</div><div class="v">${named}</div>
       <div class="k">pipeline classifier</div><div class="v">${s.classifier}</div>
       <div class="k">viewer classifier</div><div class="v">${s.live_classifier}</div>
-    </div>`;
+      <div class="k">scale</div><div class="v">${
+        S.calibrated ? `1 u = ${S.scale.toFixed(4)} m` : "uncalibrated"}</div>
+    </div>
+    <p class="note">Height is measured along gravity, taken from the mean camera
+    down-axis over the flight, against a RANSAC ground plane — not along a
+    bounding-box edge, which is aligned to an arbitrary world frame.</p>`;
 }
 
 function syncView() {
@@ -1653,7 +1742,10 @@ function setColorMode(mode) {
   } else if (mode === 2) {
     cloudUniforms.uSpanLo.value = 1;
     cloudUniforms.uSpanHi.value = Math.log2(Math.max(4, S.scene.obs_p99) + 1);
-    hudInfo(`colour: pixels per voxel, 1 to ${Math.round(S.scene.obs_p99)} (log)`);
+    hudInfo(`colour: pixels that hit each voxel, 1 to ${
+              Math.round(S.scene.obs_p99)} on a log scale — red is one pixel, ` +
+            `so least trustworthy${S.scene.obs_exact ? "" :
+              " (estimated: this map stored summed confidence, not a count)"}`);
   } else if (mode === 3) {
     cloudUniforms.uSpanLo.value = 0;
     cloudUniforms.uSpanHi.value = S.scene.num_frames || 1;
@@ -1685,7 +1777,8 @@ function setSpeed(v) {
   S.speed = Math.max(0.05, Math.min(8, v));
   $("spdSlider").value = S.speed;
   $("spdVal").textContent = S.speed.toFixed(2);
-  dom.hudSpeed.textContent = S.speed.toFixed(2) + " u/s";
+  dom.hudSpeed.textContent = S.calibrated
+    ? (S.speed * S.scale).toFixed(2) + " m/s" : S.speed.toFixed(2) + " u/s";
 }
 
 function resetView() {

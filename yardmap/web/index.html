@@ -57,6 +57,7 @@
       <tr><td>R</td><td>reset the view</td></tr>
       <tr><td>L</td><td>level the horizon (after leaving a rolled frame)</td></tr>
     </table>
+    <p class="dim">Click anywhere to dismiss.</p>
   </div>
 
   <div id="loading"><div class="bar"><i></i></div><span>loading…</span></div>
@@ -92,7 +93,7 @@
     </div>
     <div class="ctl row tight" style="margin-bottom:8px">
       <button class="act" id="exportCsv">Export table (CSV)</button>
-      <span id="plantCount" class="t2"></span>
+      <span id="plantCount" class="t2" style="color:var(--dim);font-size:11px"></span>
     </div>
     <div id="plantList"></div>
   </div>
@@ -142,7 +143,8 @@
 
   <div id="tab-sel" class="tab">
     <div id="selBody" class="info dim">
-      Nothing selected.
+      Nothing selected. Hold <b>Ctrl</b> and drag a rectangle over the cloud, or
+      click a plant.
     </div>
   </div>
 
@@ -157,8 +159,8 @@
       </select>
     </div>
     <div class="ctl">
-      <label>Point size <b id="psVal">0.0400</b></label>
-      <input id="psSlider" type="range" min="0.0005" max="0.1" step="0.0005" value="0.04">
+      <label>Point size <b id="psVal">0.0010</b></label>
+      <input id="psSlider" type="range" min="0.0005" max="0.02" step="0.0005" value="0.001">
     </div>
     <div class="ctl">
       <label>Density <b id="denVal">100%</b></label>
@@ -188,6 +190,19 @@
       <label>Move speed <b id="spdVal">1.00</b></label>
       <input id="spdSlider" type="range" min="0.05" max="8" step="0.05" value="1">
     </div>
+
+    <h4 style="margin:14px 0 5px;font-size:11px;color:var(--dim);
+        text-transform:uppercase;letter-spacing:.06em">Scale</h4>
+    <div id="scaleState" class="note"></div>
+    <div class="ctl row" style="margin-top:6px">
+      <input id="scaleTrue" type="text" placeholder="true length, metres">
+      <button class="act" id="scaleApply">Set</button>
+      <button class="act" id="scaleReset">Reset</button>
+    </div>
+    <p class="note">Measure something you know the size of (a brick course, a
+    fence panel, a doorway), then type its real length here. Monocular
+    reconstruction fixes shape but not size, so every distance below is in
+    arbitrary units until you do this once.</p>
 
     <div id="sceneInfo" class="info"></div>
   </div>
