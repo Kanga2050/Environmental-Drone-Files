@@ -27,10 +27,32 @@ from gct.utils.geometry import (
 )
 from gct.utils.pose_enc import pose_encoding_to_extri_intri
 
+def load_calib(path):
+
+    c = json.load(open(path))
+    sw, sh = c["src_size"]
+    ow, oh = c["out_size"]
+    x0, y0, x1, y1 = c["roi"]
+    K, D, Kn = (np.array(c[k], np.float64) for k in ("K", "D", "K_new"))
+    maps = {}
+
+    def undistort(rgb: np.ndarray) -> np.ndarray:
+        h, w = rgb.shape[:2]
+        if (w, h) not in maps:
+            s = np.diag([w / sw, h / sh, 1.0])
+            maps[(w, h)] = cv2.initUndistortRectifyMap(s @ K, D, None, Kn, (ow, oh), cv2.CV_32FC1)
+        mx, my = maps[(w, h)]
+        return cv2.remap(rgb, mx[y0:y1, x0:x1], my[y0:y1, x0:x1], cv2.INTER_LINEAR)
+    return undistort
+
 def make_frame_prep(crop=1.0, undistort_k1=0.0, undistort_fov=120.0, clahe=False,
-                    margins=(0.0, 0.0, 0.0, 0.0)):
+                    margins=(0.0, 0.0, 0.0, 0.0), calib=None):
+
+    undistort = load_calib(calib) if calib else None
 
     def prep(rgb: np.ndarray) -> np.ndarray:
+        if undistort is not None:
+            rgb = undistort(rgb)
         if undistort_k1:
             h, w = rgb.shape[:2]
             f = w / (2.0 * np.tan(np.radians(undistort_fov) / 2.0))
@@ -532,6 +554,9 @@ def build_parser():
                         help="Trim edges independently as fractions: TOP,BOTTOM,LEFT,RIGHT. "
                              "An OSD is rarely centred, so this clears it without the "
                              "symmetric loss --crop forces. e.g. 0.05,0.14,0,0")
+    parser.add_argument("--calib", default=None,
+                        help="Lens calibration JSON (K, D, K_new, out_size, roi): undistort every "
+                             "frame and crop to the valid region before any other trimming")
     parser.add_argument("--clahe", action="store_true",
                         help="Local contrast equalization -- helps washed-out analog video")
     parser.add_argument("--min_frame_luma", type=float, default=0.0,
@@ -631,7 +656,7 @@ class StreamMapper:
                  undistort_fov=120.0, crop_margins=(0.0, 0.0, 0.0, 0.0), clahe=False,
                  min_frame_luma=0.0, min_frame_std=0.0, sky_model=None, sky_threshold=0.5,
                  compact_every=30, pin_k=None, save_artifacts=None, artifact_every=30,
-                 source=None, fps=30.0, gpu_fraction=0.8):
+                 source=None, fps=30.0, gpu_fraction=0.8, calib=None):
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         if self.device.type == "cuda":
             # The KV cache is rebuilt by concatenation every frame, which leaves
@@ -647,7 +672,7 @@ class StreamMapper:
                         min_std=min_frame_std, artifact_every=artifact_every,
                         voxel_size=voxel_size, max_points=max_points, fuse=fuse,
                         compact_every=compact_every, crop=crop, crop_margins=list(crop_margins),
-                        clahe=clahe, source=source, fps=fps)
+                        clahe=clahe, source=source, fps=fps, calib=calib)
         if model is None:
             ns = argparse.Namespace(image_size=image_size, patch_size=patch_size,
                                     max_frame_num=max_frame_num,
@@ -660,7 +685,7 @@ class StreamMapper:
         self.model = model
         self.dtype = (torch.bfloat16 if self.device.type == "cuda"
                       and torch.cuda.get_device_capability()[0] >= 8 else torch.float16)
-        self.prep = make_frame_prep(crop, undistort_k1, undistort_fov, clahe, tuple(crop_margins))
+        self.prep = make_frame_prep(crop, undistort_k1, undistort_fov, clahe, tuple(crop_margins), calib)
         self.sky = SkyMasker(sky_model, threshold=sky_threshold) if sky_model else None
         self.pin_k = pin_k
         self.art = save_artifacts
@@ -880,7 +905,8 @@ def mapper_from_args(args):
         min_frame_std=args.min_frame_std,
         sky_model=args.sky_model if args.mask_sky else None, sky_threshold=args.sky_threshold,
         compact_every=args.compact_every, pin_k=pin_k, save_artifacts=args.save_artifacts,
-        artifact_every=args.artifact_every, source=args.video_path, fps=args.fps)
+        artifact_every=args.artifact_every, source=args.video_path, fps=args.fps,
+        calib=args.calib)
 
 
 class Feed:
