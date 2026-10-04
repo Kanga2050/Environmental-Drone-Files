@@ -764,6 +764,10 @@ def main():
                     help="Classify only the K best-scoring crops per plant instance. "
                          "Keeps a remote API's quota (and local runtime) proportional to "
                          "the number of plants, not the number of detections")
+    ap.add_argument("--health", default=None,
+                    help="Plant-health model (models/health/health.pt): rates each plant "
+                         "healthy, stressed or dead/dormant from the same views it is named "
+                         "from, and adds 'health' to plants.json")
     ap.add_argument("--foliage_crop", action=argparse.BooleanOptionalAction, default=True,
                     help="Classify the vegetation region inside each box rather than the "
                          "whole box, so pots and walls do not drive the species guess")
@@ -868,6 +872,14 @@ def main():
             json.load(open(tj)) if os.path.exists(tj) else 0.5)
         classifier = ZeroShotClassifier(args.cls_weights, "bioclip2", args.device, tau)
         print(f"Species   : BioCLIP-2 zero-shot hierarchy over {args.cls_weights}")
+    health = None
+    if args.health:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from plant_det.health import HealthClassifier
+        health = HealthClassifier(args.health, args.device,
+                                  net=classifier.net if args.classifier == "hier" else None,
+                                  cls_weights=args.cls_weights if args.classifier == "hier" else None)
+        print(f"Health    : {args.health} (tau {health.tau:.2f})")
     elif args.classifier == "plantnet":
         if not args.plantnet_api_key:
             ap.error("--classifier plantnet requires --plantnet_api_key")
@@ -999,6 +1011,9 @@ def main():
                 comp = stack_crops(views[:args.stack_views])
                 if comp is not None:
                     views = [comp] + views[1:]
+
+            if health is not None and views:
+                inst["health"] = health.classify_views(views)
 
             if args.classifier in ("hier", "zeroshot"):
                 if views:
@@ -1156,6 +1171,7 @@ def main():
             "frames": sorted({int(m["frame"]) for m in members}),
             "boxes": [{"frame": int(m["frame"]), "box": m["box_src"], "crop": m["crop"]}
                       for m in members],
+            **({"health": inst["health"]} if inst.get("health") else {}),
         })
 
     pts_path = os.path.join(art, "plant_points.npz")
