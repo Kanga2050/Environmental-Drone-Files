@@ -377,30 +377,31 @@ def main():
     def btag(i):
         b = blobs[i]
         if not split:
-            return tag(i, b)
-        return "".join(f'<script type="application/octet-stream" data-of="{i}">'
-                       f'{b[k:k + SPLIT_CHARS]}</script>\n'
-                       for k in range(0, len(b), SPLIT_CHARS))
+            return [tag(i, b)]
+        return [f'<script type="application/octet-stream" data-of="{i}">'
+                f'{b[k:k + SPLIT_CHARS]}</script>\n'
+                for k in range(0, len(b), SPLIT_CHARS)]
 
     safe = lambda o: json.dumps(o, separators=(",", ":")).replace("</", "<\\/")
     js = js.replace("</script", "<\\/script")
-    payload = (
-        tag("d_scene", safe(scene), "application/json")
-        + tag("d_extra", safe({"qmin": qmin.tolist(), "qstep": qstep.tolist(),
-                                "member": table}), "application/json")
-        + tag("d_imgs", safe(imgs), "application/json")
-        + btag("d_pos") + btag("d_tag")
-        + (btag("d_prov") if prov else "")
-        + btag("d_col") + btag("d_member")
-        + f"<script>{shim}</script>\n"
-        + f'<script type="module">\n{js}\n</script>'
-    )
-    html = patch(html, '<script type="module" src="/static/app.js"></script>',
-                 payload, "the app script")
+    parts = ([tag("d_scene", safe(scene), "application/json"),
+              tag("d_extra", safe({"qmin": qmin.tolist(), "qstep": qstep.tolist(),
+                                   "member": table}), "application/json"),
+              tag("d_imgs", safe(imgs), "application/json")]
+             + btag("d_pos") + btag("d_tag") + (btag("d_prov") if prov else [])
+             + btag("d_col") + btag("d_member")
+             + [f"<script>{shim}</script>\n", f'<script type="module">\n{js}\n</script>'])
+    app = '<script type="module" src="/static/app.js"></script>'
+    if app not in html:
+        print("warning: could not patch the app script")
+    head, _, tail = html.partition(app)
 
     out = args.out or os.path.basename(os.path.abspath(s.art)) + "_viewer.html"
     with open(out, "w", encoding="utf-8") as f:
-        f.write(html)
+        f.write(head)
+        for p in parts:
+            f.write(p)
+        f.write(tail.replace(app, "".join(parts)) if app in tail else tail)
     print(f"wrote {out}: {os.path.getsize(out) / 1e6:.1f} MB, {n:,} points, "
           f"{len(imgs['i'])} photos, {time.time() - t0:.0f}s")
 
