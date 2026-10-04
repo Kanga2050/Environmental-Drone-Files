@@ -224,9 +224,6 @@ class BoundedPointMap:
             self.dropped += len(self._key) - self.max_points
             for a in ("_key", "_w", "_n", "_psum", "_csum", "_first", "_age"):
                 setattr(self, a, np.ascontiguousarray(getattr(self, a)[keep]))
-        safe = np.maximum(self._w, 1e-6)[:, None]
-        self._pos = self._psum / safe
-        self._col = np.clip(self._csum / safe, 0, 255).astype(np.uint8)
 
     def _compact_average(self) -> None:
 
@@ -298,10 +295,20 @@ class BoundedPointMap:
 
     def snapshot(self):
         self.compact()
-        return self._pos, self._col
+        if not self.lowmem:
+            return self._pos, self._col
+        n = len(self._key)
+        pos = np.empty((n, 3), np.float32)
+        col = np.empty((n, 3), np.uint8)
+        for a in range(0, n, 1 << 24):
+            b = min(n, a + (1 << 24))
+            safe = np.maximum(self._w[a:b], 1e-6)[:, None]
+            pos[a:b] = self._psum[a:b] / safe
+            col[a:b] = np.clip(self._csum[a:b] / safe, 0, 255)
+        return pos, col
 
     def __len__(self) -> int:
-        return len(self._pos) + sum(len(p) for p in self._pending_pos)
+        return (len(self._key) if self.lowmem else len(self._pos)) + sum(len(p) for p in self._pending_pos)
 
     def nbytes(self) -> int:
         return (self._pos.nbytes + self._col.nbytes + self._age.nbytes
