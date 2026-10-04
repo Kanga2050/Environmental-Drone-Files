@@ -102,8 +102,9 @@ class BoundedPointMap:
     _HALF = 1 << (_BITS - 1)
 
     def __init__(self, voxel_size: float, max_points: int, compact_every: int = 30,
-                 average: bool = False):
+                 average: bool = False, lowmem: bool = False):
         self.voxel_size = float(voxel_size)
+        self.lowmem = bool(lowmem)
         self.max_points = int(max_points)
         self.compact_every = int(compact_every)
         self.average = bool(average)
@@ -172,8 +173,65 @@ class BoundedPointMap:
         self._col = np.ascontiguousarray(col[keep])
         self._age = np.ascontiguousarray(age[keep])
 
+    def _compact_average_lowmem(self) -> None:
+
+        new_pos = np.concatenate(self._pending_pos, axis=0)
+        new_col = np.concatenate(self._pending_col, axis=0).astype(np.float32)
+        new_age = np.concatenate(self._pending_age, axis=0).astype(np.int32)
+        new_w = (np.concatenate(self._pending_w, axis=0) if self._pending_w
+                 else np.ones(len(new_pos), np.float32))
+        self._pending_pos, self._pending_col = [], []
+        self._pending_age, self._pending_w = [], []
+        self._since_compact = 0
+
+        uk, inv = np.unique(self._keys(new_pos), return_inverse=True)
+        inv = inv.reshape(-1)
+        m = len(uk)
+        w = np.bincount(inv, weights=new_w, minlength=m).astype(np.float32)
+        n = np.bincount(inv, minlength=m).astype(np.int32)
+        ps = np.stack([np.bincount(inv, weights=new_pos[:, k] * new_w, minlength=m)
+                       for k in range(3)], axis=1).astype(np.float32)
+        cs = np.stack([np.bincount(inv, weights=new_col[:, k] * new_w, minlength=m)
+                       for k in range(3)], axis=1).astype(np.float32)
+        last = np.zeros(m, np.int32)
+        first = np.zeros(m, np.int32)
+        last[inv] = new_age
+        first[inv[::-1]] = new_age[::-1]
+        del new_pos, new_col, new_w, inv
+
+        n_old = len(self._key)
+        idx = np.searchsorted(self._key, uk)
+        hit = idx < n_old
+        hit[hit] = self._key[idx[hit]] == uk[hit]
+        h = idx[hit]
+        self._w[h] += w[hit]
+        self._n[h] += n[hit]
+        self._psum[h] += ps[hit]
+        self._csum[h] += cs[hit]
+        self._age[h] = np.maximum(self._age[h], last[hit])
+        nw = ~hit
+        at = idx[nw]
+        self._key = np.insert(self._key, at, uk[nw])
+        self._w = np.insert(self._w, at, w[nw])
+        self._n = np.insert(self._n, at, n[nw])
+        self._psum = np.insert(self._psum, at, ps[nw], axis=0)
+        self._csum = np.insert(self._csum, at, cs[nw], axis=0)
+        self._first = np.insert(self._first, at, first[nw])
+        self._age = np.insert(self._age, at, last[nw].astype(np.int64))
+
+        if len(self._key) > self.max_points:
+            keep = np.sort(np.argpartition(self._age, -self.max_points)[-self.max_points:])
+            self.dropped += len(self._key) - self.max_points
+            for a in ("_key", "_w", "_n", "_psum", "_csum", "_first", "_age"):
+                setattr(self, a, np.ascontiguousarray(getattr(self, a)[keep]))
+        safe = np.maximum(self._w, 1e-6)[:, None]
+        self._pos = self._psum / safe
+        self._col = np.clip(self._csum / safe, 0, 255).astype(np.uint8)
+
     def _compact_average(self) -> None:
 
+        if self.lowmem:
+            return self._compact_average_lowmem()
         new_pos = np.concatenate(self._pending_pos, axis=0)
         new_col = np.concatenate(self._pending_col, axis=0).astype(np.float32)
         new_age = np.concatenate(self._pending_age, axis=0)
@@ -554,6 +612,9 @@ def build_parser():
                         help="Trim edges independently as fractions: TOP,BOTTOM,LEFT,RIGHT. "
                              "An OSD is rarely centred, so this clears it without the "
                              "symmetric loss --crop forces. e.g. 0.05,0.14,0,0")
+    parser.add_argument("--lowmem_fuse", action="store_true",
+                        help="Merge each batch into the sorted map in place instead of re-sorting "
+                             "the whole map; needed for maps of tens of millions of points")
     parser.add_argument("--calib", default=None,
                         help="Lens calibration JSON (K, D, K_new, out_size, roi): undistort every "
                              "frame and crop to the valid region before any other trimming")
@@ -656,7 +717,8 @@ class StreamMapper:
                  undistort_fov=120.0, crop_margins=(0.0, 0.0, 0.0, 0.0), clahe=False,
                  min_frame_luma=0.0, min_frame_std=0.0, sky_model=None, sky_threshold=0.5,
                  compact_every=30, pin_k=None, save_artifacts=None, artifact_every=30,
-                 source=None, fps=30.0, gpu_fraction=0.8, calib=None):
+                 source=None, fps=30.0, gpu_fraction=0.8, calib=None,
+                 lowmem_fuse=False):
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         if self.device.type == "cuda":
             # The KV cache is rebuilt by concatenation every frame, which leaves
@@ -672,7 +734,8 @@ class StreamMapper:
                         min_std=min_frame_std, artifact_every=artifact_every,
                         voxel_size=voxel_size, max_points=max_points, fuse=fuse,
                         compact_every=compact_every, crop=crop, crop_margins=list(crop_margins),
-                        clahe=clahe, source=source, fps=fps, calib=calib)
+                        clahe=clahe, source=source, fps=fps, calib=calib,
+                        lowmem_fuse=lowmem_fuse)
         if model is None:
             ns = argparse.Namespace(image_size=image_size, patch_size=patch_size,
                                     max_frame_num=max_frame_num,
@@ -794,7 +857,8 @@ class StreamMapper:
                 if len(pts) else 1.0
             voxel = max(ext / 512.0, 1e-6)
         self.point_map = BoundedPointMap(voxel, c["max_points"], c["compact_every"],
-                                         average=(c["fuse"] == "average"))
+                                         average=(c["fuse"] == "average"),
+                                         lowmem=c["lowmem_fuse"])
         self.point_map.add(pts, cols, 0, w)
         ids = list(range(n))
         if self.art:
@@ -906,7 +970,7 @@ def mapper_from_args(args):
         sky_model=args.sky_model if args.mask_sky else None, sky_threshold=args.sky_threshold,
         compact_every=args.compact_every, pin_k=pin_k, save_artifacts=args.save_artifacts,
         artifact_every=args.artifact_every, source=args.video_path, fps=args.fps,
-        calib=args.calib)
+        calib=args.calib, lowmem_fuse=args.lowmem_fuse)
 
 
 class Feed:
