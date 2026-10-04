@@ -18,6 +18,18 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from view_map3d import WEB, MapScene
 
+SPLIT_CHARS = 1 << 28
+SHIM_ONE = """    const el = document.getElementById(id);
+    const raw = b64bytes(el.textContent);
+    el.textContent = "";
+    const ds = new Blob([raw]).stream()"""
+SHIM_PARTS = """    const raw = [...document.querySelectorAll(`script[data-of="${id}"]`)].map((el) => {
+      const b = b64bytes(el.textContent);
+      el.textContent = "";
+      return b;
+    });
+    const ds = new Blob(raw).stream()"""
+
 SHIM = r"""
 (() => {
   const b64bytes = (s) => {
@@ -355,6 +367,21 @@ def main():
     def tag(i, body, kind="application/octet-stream"):
         return f'<script type="{kind}" id="{i}">{body}</script>\n'
 
+    blobs = {"d_pos": b64gz(q), "d_tag": b64gz(s.tags), "d_col": b64gz(s.colors),
+             "d_member": b64gz(member)}
+    if prov:
+        blobs["d_prov"] = base64.b64encode(gzip.compress(prov, 6)).decode()
+    split = max(len(v) for v in blobs.values()) > SPLIT_CHARS
+    shim = SHIM.replace(SHIM_ONE, SHIM_PARTS) if split else SHIM
+
+    def btag(i):
+        b = blobs[i]
+        if not split:
+            return tag(i, b)
+        return "".join(f'<script type="application/octet-stream" data-of="{i}">'
+                       f'{b[k:k + SPLIT_CHARS]}</script>\n'
+                       for k in range(0, len(b), SPLIT_CHARS))
+
     safe = lambda o: json.dumps(o, separators=(",", ":")).replace("</", "<\\/")
     js = js.replace("</script", "<\\/script")
     payload = (
@@ -362,10 +389,10 @@ def main():
         + tag("d_extra", safe({"qmin": qmin.tolist(), "qstep": qstep.tolist(),
                                 "member": table}), "application/json")
         + tag("d_imgs", safe(imgs), "application/json")
-        + tag("d_pos", b64gz(q)) + tag("d_tag", b64gz(s.tags))
-        + (tag("d_prov", base64.b64encode(gzip.compress(prov, 6)).decode()) if prov else "")
-        + tag("d_col", b64gz(s.colors)) + tag("d_member", b64gz(member))
-        + f"<script>{SHIM}</script>\n"
+        + btag("d_pos") + btag("d_tag")
+        + (btag("d_prov") if prov else "")
+        + btag("d_col") + btag("d_member")
+        + f"<script>{shim}</script>\n"
         + f'<script type="module">\n{js}\n</script>'
     )
     html = patch(html, '<script type="module" src="/static/app.js"></script>',
