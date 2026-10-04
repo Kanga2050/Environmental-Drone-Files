@@ -6,6 +6,7 @@ source frame, then each box is given to the plant whose lifted points it
 contains.  Newer detect_plants.py runs write the boxes directly
 ("boxes" on each plant) and this step is skipped.
 """
+import hashlib
 import json
 import os
 import re
@@ -63,9 +64,15 @@ def plant_views(art, plants, seeds, frames, model_hw, cache=True):
     {fid: dict(extrinsic, intrinsic, jpg)}.
     """
     path = os.path.join(art, "plant_views.json")
+    # the cache is only valid for the plants it was built from: a new
+    # detect_plants.py run renumbers them
+    sig = hashlib.sha1(json.dumps([[p["id"], p.get("boxes", p.get("frames"))] for p in plants],
+                                  sort_keys=True).encode()).hexdigest()
     if cache and os.path.exists(path):
         with open(path, encoding="utf-8") as f:
-            return {int(k): v for k, v in json.load(f).items()}
+            saved = json.load(f)
+        if saved.get("plants_sig") == sig:
+            return {int(k): v for k, v in saved["views"].items()}
 
     if all("boxes" in p for p in plants):
         boxes = {}
@@ -108,5 +115,5 @@ def plant_views(art, plants, seeds, frames, model_hw, cache=True):
                                     "hit": round(float(best_frac), 3)})
     if cache:
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(views, f)
+            json.dump({"plants_sig": sig, "views": views}, f)
     return views
