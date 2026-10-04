@@ -818,8 +818,10 @@ def main():
     meta = load_meta(art)
     model_hw = tuple(meta["model_hw"])
     conf_threshold = args.conf_threshold
+    conf_pct = 0.0
     if conf_threshold is None:
         conf_threshold = meta.get("conf_threshold", 1.5)
+        conf_pct = float(meta.get("conf_percentile", 0.0))
     support_cell = args.support_cell or meta.get("voxel_size", 0.005) * 2.0
     frame_ids = meta["saved_frame_ids"][::max(1, args.frame_stride)]
     if args.max_frames:
@@ -915,7 +917,8 @@ def main():
                 rejected_veg += 1
                 continue
             geo = lift_box_to_3d(box, world, conf, rgb_model, scale, y_off,
-                                 conf_threshold, args.min_points,
+                                 (np.percentile(conf, conf_pct) if conf_pct > 0
+                                  else conf_threshold), args.min_points,
                                  use_vegetation=args.vegetation_mask,
                                  veg_erode=args.veg_erode,
                                  depth=depth, depth_band=args.depth_band,
