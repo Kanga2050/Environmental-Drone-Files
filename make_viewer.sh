@@ -30,14 +30,14 @@ MAP="maps/$NAME"
   --save_artifacts "$MAP" --artifact_every 30 --no_viewer
 
 cd yardmap
-# 2. Find plants: detector ensemble -> lift boxes to 3D -> cluster -> name
+# 2. Find plants: detector ensemble -> lift boxes to 3D -> cluster -> name, health
 #    (growth form -> family -> genus -> species, stopping when unsure)
 "../$PY" detect_plants.py --artifacts "../$MAP" \
   --detector yolo --det_weights "../$M/detector_fpv.pt,../$M/detector_yard.pt" \
   --det_threshold 0.10 --det_tta --max_box_frac 0.85 \
   --cluster_frac 0.026 --merge_iou 0.25 --merge_sep_frac 0.8 \
   --classifier hier --cls_weights "../$M/classifier/best.pt" --tau "../$M/classifier/tau85.json" \
-  --classify_top_k 12
+  --classify_top_k 12 --health "../$M/health/health.pt"
 
 # 3. Assign map points to plants (Point Transformer)
 "../$PY" -m plant_seg.segment --artifacts "../$MAP" --weights "../$M/plant_seg.pt" --threshold 0.4
