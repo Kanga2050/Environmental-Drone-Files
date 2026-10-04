@@ -1183,6 +1183,24 @@ function hierLadder(h) {
     }).join("") + `</div>`;
 }
 
+const HEALTH_COL = { healthy: "#3fb950", stressed: "#d29922", dead: "#f85149", unsure: "#8b949e" };
+
+function healthTag(h) {
+  const name = h.label === "dead" ? "dead / dormant" : h.label;
+  return `<span style="color:${HEALTH_COL[h.label] || "#8b949e"}">${name}${
+    h.label === "unsure" ? ` (${h.guess}?)` : ""}</span>`;
+}
+
+function healthLadder(h) {
+  // leaf condition from the same views the plant was named from
+  return `<div class="dist"><div class="distlab">health &mdash; ${healthTag(h)}
+    from ${h.views} views</div>` + Object.entries(h.probs).map(([c, v]) =>
+      `<div class="bar"><span class="bn">${c === "dead" ? "dead / dormant" : c}</span>
+        <span class="bt"><i style="background:${HEALTH_COL[c]};width:${
+          Math.max(1, v * 100).toFixed(1)}%"></i></span>
+        <span class="bv">${v.toFixed(2)}</span></div>`).join("") + `</div>`;
+}
+
 function speciesLine(p) {
   if (p.hierarchy) {
     const h = p.hierarchy;
@@ -1239,6 +1257,7 @@ function renderPlantDetail(i) {
     ${p.crop ? `<img class="crop" src="/api/crop/${p.crop}">` : ""}
     <div>${speciesLine(p)}</div>
     ${p.hierarchy ? hierLadder(p.hierarchy) : ""}
+    ${p.health ? healthLadder(p.health) : ""}
     <div class="kv" style="margin-top:8px">
       <div class="k">detection</div><div class="v">${p.detection_score.toFixed(2)}</div>
       <div class="k">category vote</div><div class="v">${p.category_confidence.toFixed(2)}</div>
@@ -1314,7 +1333,8 @@ function renderPlantList() {
     .filter(({ p }) => p.detection_score >= S.conf)
     .filter(({ p }) => !onlyNamed || p.species_identified)
     .filter(({ p }) => !q || (
-      `#${p.id} ${p.category} ${p.species || ""} ${p.species_common || ""}`
+      `#${p.id} ${p.category} ${p.species || ""} ${p.species_common || ""} ${
+        p.health ? p.health.label : ""}`
         .toLowerCase().includes(q)))
     .filter(({ p }) => !onlyVis || plantVisible(p));
   const key = {
@@ -1336,7 +1356,8 @@ function renderPlantList() {
       <div class="head">
         <span class="swatch" style="background:rgb(${c.join(",")})"></span>
         <span class="t1">#${p.id} ${p.category}
-          ${p.species_identified ? `<span class="sp">${p.species}</span>` : ""}</span>
+          ${p.species_identified ? `<span class="sp">${p.species}</span>` : ""}
+          ${p.health ? healthTag(p.health) : ""}</span>
         <span class="t2">${m.height_m ? fmtLenShort(m.height_m) + " · " : ""}${
           p.detection_score.toFixed(2)}</span>
       </div></div>`;
@@ -1670,7 +1691,7 @@ function buildUI() {
                   "view_spread", "sharpening", "entropy", "identified", "views",
                   "cloud_points", `height_${u}`, `crown_w_${u}`, `crown_d_${u}`,
                   `volume_${u}3`, "mean_r", "mean_g", "mean_b",
-                  "x", "y", "z"];
+                  "x", "y", "z", "health", "health_conf"];
     const rows = S.scene.plants
       .filter((p) => p.detection_score >= S.conf)
       .map((p) => {
@@ -1687,7 +1708,8 @@ function buildUI() {
                 ((m.crown_d_m || 0) * k).toFixed(4),
                 ((m.volume_m3 || 0) * k ** 3).toFixed(6),
                 ...c.map((v) => Math.round(v)),
-                ...p.centroid.map((v) => v.toFixed(4))];
+                ...p.centroid.map((v) => v.toFixed(4)),
+                p.health ? p.health.label : "", p.health ? p.health.conf : ""];
       });
     const esc = (v) => (/[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : v);
     download([head, ...rows].map((r) => r.map(esc).join(",")).join("\n"),
@@ -1939,8 +1961,10 @@ function drawLabels() {
     const sp = withSpecies && c.p.species_identified
       ? ` <span style="opacity:.8"><i>${c.p.species}</i></span>`
       : ` <span style="opacity:.6">${c.p.detection_score.toFixed(2)}</span>`;
+    const hl = c.p.health && c.p.health.label !== "unsure"
+      ? ` <span style="color:${HEALTH_COL[c.p.health.label]}">&#9679;</span>` : "";
     el.innerHTML = `<b style="color:rgb(${col.join(",")})">#${c.p.id}</b> ${
-      c.p.category}${sp}`;
+      c.p.category}${sp}${hl}`;
     el.style.display = "block";
     el.style.left = c.px + "px";
     el.style.top = c.py + "px";

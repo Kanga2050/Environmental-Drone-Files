@@ -31,7 +31,7 @@ PLANT_FIELDS = {
     "species_sharpening": None, "species_entropy": None,
     "species_entropy_max": None, "species_unsupported": False,
     "views": 0, "frames": [], "crop": "", "bbox_min": None, "bbox_max": None,
-    "centroid": None, "metrics": {}, "hierarchy": None,
+    "centroid": None, "metrics": {}, "hierarchy": None, "health": None,
 }
 
 MEAN_CONF = 2.43
