@@ -280,12 +280,15 @@ def main():
     ap.add_argument("--photo_side", type=int, default=640,
                     help="Longest side of embedded frame photos (0 = no photos)")
     ap.add_argument("--highlight_radius", type=float, default=2.5)
+    ap.add_argument("--camera_mount", choices=["forward", "down"], default="forward",
+                    help="down: camera looks at the ground, so gravity is its view axis")
     ap.add_argument("--min_conf", type=float, default=None,
                     help="Default 'min detection conf' filter (the page's own default is 0.15)")
     args = ap.parse_args()
 
     t0 = time.time()
-    s = MapScene(args.artifacts, args.plants, args.highlight_radius, args.max_points)
+    s = MapScene(args.artifacts, args.plants, args.highlight_radius, args.max_points,
+                 mount=args.camera_mount)
     scene = s.scene_json()
     scene["live_classifier"] = "none"
     n = len(s.points)

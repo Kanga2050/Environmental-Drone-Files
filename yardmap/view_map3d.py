@@ -69,10 +69,10 @@ def fit_plane(points, iters=200, tol=0.02, seed=0):
     mask = np.abs(points @ best_n + best_d) < tol
     return best_n, best_d, mask
 
-def camera_up(frames):
+def camera_up(frames, mount="forward"):
     down = np.array([0.0, 1.0, 0.0])
     if frames:
-        m = np.mean([f["extrinsic"][1, :3] for f in frames], axis=0)
+        m = np.mean([f["extrinsic"][2 if mount == "down" else 1, :3] for f in frames], axis=0)
         if np.linalg.norm(m) > 1e-6:
             down = m / np.linalg.norm(m)
     return (-down).astype(np.float32)
@@ -80,7 +80,7 @@ def camera_up(frames):
 class MapScene:
 
     def __init__(self, art, plants_file=None, highlight_radius=2.5,
-                 max_points=0, conf_threshold=None, use_seg=True):
+                 max_points=0, conf_threshold=None, use_seg=True, mount="forward"):
         self.art = art
         self.use_seg = use_seg
         t0 = time.time()
@@ -129,7 +129,7 @@ class MapScene:
         self.palette = instance_colors(len(self.plants))
 
         self._load_frames()
-        self.up = camera_up(self.frames)
+        self.up = camera_up(self.frames, mount)
 
         self.tree = cKDTree(self.points)
         self._assign_plant_points(highlight_radius)
