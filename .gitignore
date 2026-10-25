@@ -13,3 +13,7 @@ __pycache__/
 
 # fine-tuning runs (adapters, merged checkpoints, logs)
 training/runs/
+
+# plant health training data and runs
+training/health/data/
+training/health/runs/
